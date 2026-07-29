@@ -1,0 +1,14 @@
+[project]
+name = "elo-winning-rate"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.18.5",
+    "asyncmy>=0.2.11",
+    "fastapi[all]>=0.140.13",
+    "python-dotenv>=1.2.2",
+    "sqlalchemy[asyncio]>=2.0.51",
+    "sqlmodel>=0.0.39",
+]
