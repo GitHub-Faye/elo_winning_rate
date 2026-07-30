@@ -12,6 +12,7 @@ from services.prediction_service import (
     PlayerRatingSnapshot,
     PredictionService,
     _build_result,
+    _view_for_side,
 )
 
 
@@ -101,6 +102,16 @@ class TestDoubles:
         """match_type 为 doubles。"""
         resp = await service.predict(self._make_request())
         assert resp.data.match_type == "doubles"
+
+    @pytest.mark.asyncio
+    async def test_doubles_probability_invariants(self, service: PredictionService):
+        """双打各方选手胜率之和 = 2（4 人各有一个对面胜率，合计应跨队配对和为 2）。"""
+        resp = await service.predict(self._make_request())
+        pa = [p.probability for p in resp.data.team_a.players]
+        pb = [p.probability for p in resp.data.team_b.players]
+        # 每个 A 选手概率 + 其对面的 B 选手概率 ≈ 1（平均值意义上）
+        for a_prob, b_prob in zip(pa, pb):
+            assert abs(a_prob + b_prob - 1.0) < 0.001, f"a={a_prob}, b={b_prob}"
 
 
 class TestEdgeCases:
@@ -215,10 +226,52 @@ class TestRelationGraph:
 
 
 class TestBuildResult:
-    """_build_result 纯函数的独立测试"""
+    """_build_result 和 _view_for_side 纯函数的独立测试"""
 
-    def test_build_result_is_a(self):
-        """is_a=True 时使用队友字段。"""
+    def test_view_for_side_is_a(self):
+        """is_a=True 时 _view_for_side 直接读取 A 方字段。"""
+        from types import SimpleNamespace
+
+        result = SimpleNamespace(
+            probability_a=0.75,
+            probability_b=0.25,
+            elo_base_probability=0.6,
+            direct_adjustment=0.08,
+            indirect_adjustment=0.07,
+            direct_record={"wins": 3, "losses": 1, "total": 4},
+        )
+        v = _view_for_side(result, is_a=True)
+        assert v.probability == 0.75
+        assert v.elo_base_probability == 0.6
+        assert v.direct_adjustment == 0.08
+        assert v.indirect_adjustment == 0.07
+        assert v.direct_record_wins == 3
+        assert v.direct_record_losses == 1
+        assert v.direct_record_total == 4
+
+    def test_view_for_side_is_b(self):
+        """is_a=False 时 _view_for_side 翻转字段。"""
+        from types import SimpleNamespace
+
+        result = SimpleNamespace(
+            probability_a=0.75,
+            probability_b=0.25,
+            elo_base_probability=0.6,
+            direct_adjustment=0.08,
+            indirect_adjustment=0.07,
+            direct_record={"wins": 3, "losses": 1, "total": 4},
+        )
+        v = _view_for_side(result, is_a=False)
+        assert v.probability == 0.25
+        assert abs(v.elo_base_probability - 0.4) < 0.001
+        assert v.direct_adjustment == -0.08
+        assert v.indirect_adjustment == -0.07
+        assert v.direct_record_wins == 1  # B's wins = A's losses
+        assert v.direct_record_losses == 3  # B's losses = A's wins
+        assert v.direct_record_total == 4
+
+    def test_build_result_proxies_view(self):
+        """_build_result 使用 _view_for_side 的结果构建 PlayerPredictionResult。"""
         from types import SimpleNamespace
 
         result = SimpleNamespace(
@@ -233,30 +286,14 @@ class TestBuildResult:
         pr = _build_result(1, snapshot, result, is_a=True)
 
         assert pr.user_id == 1
+        assert pr.rating == 1600.0
         assert pr.probability == 0.75
         assert pr.elo_base_probability == 0.6
         assert pr.direct_record_wins == 3
         assert pr.direct_record_losses == 1
         assert pr.direct_record_total == 4
 
-    def test_build_result_is_b(self):
-        """is_a=False 时翻转 probability 和交手记录。"""
-        from types import SimpleNamespace
-
-        result = SimpleNamespace(
-            probability_a=0.75,
-            probability_b=0.25,
-            elo_base_probability=0.6,
-            direct_adjustment=0.08,
-            indirect_adjustment=0.07,
-            direct_record={"wins": 3, "losses": 1, "total": 4},
-        )
-        snapshot = PlayerRatingSnapshot(rating=1500.0, games=10, wins=5, losses=5)
-        pr = _build_result(2, snapshot, result, is_a=False)
-
-        assert pr.user_id == 2
-        assert pr.probability == 0.25
-        assert abs(pr.elo_base_probability - 0.4) < 0.001
-        # direct_record flipped: B's wins = A's losses
-        assert pr.direct_record_wins == 1
-        assert pr.direct_record_losses == 3
+        pr_b = _build_result(2, snapshot, result, is_a=False)
+        assert pr_b.probability == 0.25
+        assert pr_b.direct_record_wins == 1  # flipped
+        assert pr_b.direct_record_losses == 3

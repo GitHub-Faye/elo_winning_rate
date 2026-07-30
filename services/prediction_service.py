@@ -26,6 +26,7 @@ from core.schemas import (
 )
 from winning_rate import (
     PlayerRecord,
+    PredictionResult,
     RelationGraph,
     build_relation_graph as build_relation_graph_from_raw,
     predict_win_rate,
@@ -46,10 +47,14 @@ class PlayerRatingSnapshot:
 _DEFAULT_RATING = PlayerRatingSnapshot(1500.0, 0, 0, 0)
 
 
-async def _build_relation_graph_async(
+async def build_relation_graph(
     db: AsyncSession, player_ids: list[int],
 ) -> RelationGraph:
-    """异步版：从 elo_match_record 构建选手胜负关系图。"""
+    """从 elo_match_record 构建选手胜负关系图。
+
+    先查询输入选手的所有比赛记录，再扩展查询其对手的比赛记录，
+    构建包含 2 跳层次的 RelationGraph，供间接关系搜索使用。
+    """
     # 第1层：输入选手的比赛记录
     stmt1 = select(EloMatchRecord).where(
         EloMatchRecord.user_id.in_(player_ids),
@@ -85,6 +90,48 @@ async def _build_relation_graph_async(
     return build_relation_graph_from_raw(dict(raw))
 
 
+# ── 纯函数：共享的翻转逻辑（消除 is_a 分支重复） ──
+
+
+@dataclass
+class _SideView:
+    """从一方视角查看的 PredictionResult 快照。"""
+    probability: float
+    elo_base_probability: float
+    direct_adjustment: float
+    indirect_adjustment: float
+    direct_record_wins: int
+    direct_record_losses: int
+    direct_record_total: int
+
+
+def _view_for_side(result: PredictionResult, is_a: bool) -> _SideView:
+    """从指定方视角提取预测结果各项值。
+
+    is_a=True 时直接读取 A 方字段；is_a=False 时翻转（1-x / -x 及交手记录互换）。
+    """
+    dr = result.direct_record
+    if is_a:
+        return _SideView(
+            probability=result.probability_a,
+            elo_base_probability=result.elo_base_probability,
+            direct_adjustment=result.direct_adjustment,
+            indirect_adjustment=result.indirect_adjustment,
+            direct_record_wins=dr["wins"],
+            direct_record_losses=dr["losses"],
+            direct_record_total=dr["total"],
+        )
+    return _SideView(
+        probability=result.probability_b,
+        elo_base_probability=1.0 - result.elo_base_probability,
+        direct_adjustment=-result.direct_adjustment,
+        indirect_adjustment=-result.indirect_adjustment,
+        direct_record_wins=dr["losses"],
+        direct_record_losses=dr["wins"],
+        direct_record_total=dr["total"],
+    )
+
+
 def _to_player_record(user_id: int, snapshot: PlayerRatingSnapshot) -> PlayerRecord:
     """从快照构建 PlayerRecord（用于 winning_rate.py 的纯函数接口）。"""
     return PlayerRecord(
@@ -97,30 +144,13 @@ def _to_player_record(user_id: int, snapshot: PlayerRatingSnapshot) -> PlayerRec
 def _side_result(
     pid: int,
     snapshot: PlayerRatingSnapshot,
-    cross: dict,
+    cross: dict[tuple[int, int], PredictionResult],
     side_ids: list[int],
     is_a: bool,
-    attr_prob: str,
 ) -> PlayerPredictionResult:
-    """构建一方选手的预测结果（Team A 或 Team B，通过 is_a 控制翻转方向）。"""
-    if is_a:
-        pairs = [cross[(pid, oid)] for oid in side_ids]
-        d_wins = sum(p.direct_record["wins"] for p in pairs)
-        d_losses = sum(p.direct_record["losses"] for p in pairs)
-        prob = _avg("probability", [getattr(p, attr_prob) for p in pairs])
-        elo_base = _avg("elo_base", [p.elo_base_probability for p in pairs])
-        direct_adj = _avg("direct_adj", [p.direct_adjustment for p in pairs])
-        indirect_adj = _avg("indirect_adj", [p.indirect_adjustment for p in pairs])
-    else:
-        pairs = [cross[(oid, pid)] for oid in side_ids]
-        d_wins = sum(p.direct_record["losses"] for p in pairs)
-        d_losses = sum(p.direct_record["wins"] for p in pairs)
-        prob = 1.0 - _avg("probability", [getattr(p, attr_prob) for p in pairs])
-        elo_base = 1.0 - _avg("elo_base", [p.elo_base_probability for p in pairs])
-        direct_adj = -_avg("direct_adj", [p.direct_adjustment for p in pairs])
-        indirect_adj = -_avg("indirect_adj", [p.indirect_adjustment for p in pairs])
-
-    d_total = sum(p.direct_record["total"] for p in pairs)
+    """构建一方选手的双打平均预测结果（Team A 或 Team B，通过 is_a 控制方向）。"""
+    pairs = [cross[(pid, oid)] if is_a else cross[(oid, pid)] for oid in side_ids]
+    views = [_view_for_side(p, is_a) for p in pairs]
 
     return PlayerPredictionResult(
         user_id=pid,
@@ -128,18 +158,45 @@ def _side_result(
         games=snapshot.games,
         wins=snapshot.wins,
         losses=snapshot.losses,
-        probability=prob,
-        elo_base_probability=elo_base,
-        direct_adjustment=direct_adj,
-        indirect_adjustment=indirect_adj,
-        direct_record_wins=d_wins,
-        direct_record_losses=d_losses,
-        direct_record_total=d_total,
+        probability=_avg([v.probability for v in views]),
+        elo_base_probability=_avg([v.elo_base_probability for v in views]),
+        direct_adjustment=_avg([v.direct_adjustment for v in views]),
+        indirect_adjustment=_avg([v.indirect_adjustment for v in views]),
+        direct_record_wins=sum(v.direct_record_wins for v in views),
+        direct_record_losses=sum(v.direct_record_losses for v in views),
+        direct_record_total=sum(v.direct_record_total for v in views),
     )
 
 
-def _avg(_name: str, values: list[float]) -> float:
+def _avg(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _build_result(
+    user_id: int,
+    snapshot: PlayerRatingSnapshot,
+    result: PredictionResult,
+    is_a: bool,
+) -> PlayerPredictionResult:
+    """从单条 PredictionResult 构建 PlayerPredictionResult。"""
+    v = _view_for_side(result, is_a)
+    return PlayerPredictionResult(
+        user_id=user_id,
+        rating=snapshot.rating,
+        games=snapshot.games,
+        wins=snapshot.wins,
+        losses=snapshot.losses,
+        probability=v.probability,
+        elo_base_probability=v.elo_base_probability,
+        direct_adjustment=v.direct_adjustment,
+        indirect_adjustment=v.indirect_adjustment,
+        direct_record_wins=v.direct_record_wins,
+        direct_record_losses=v.direct_record_losses,
+        direct_record_total=v.direct_record_total,
+    )
+
+
+# ── Service 类 ──
 
 
 class PredictionService:
@@ -160,7 +217,7 @@ class PredictionService:
 
         all_player_ids = list(set(req.team_a + req.team_b))
         ratings = await self._load_player_ratings(all_player_ids)
-        graph = await _build_relation_graph_async(self.db, all_player_ids)
+        graph = await build_relation_graph(self.db, all_player_ids)
 
         if team_size == 1:
             data = self._predict_singles(
@@ -233,7 +290,7 @@ class PredictionService:
     ) -> PredictionData:
         """双打预测：两两配对后取各选手平均胜率。"""
         # 两两配对预测
-        cross: dict = {}
+        cross: dict[tuple[int, int], PredictionResult] = {}
         for a_id in team_a_ids:
             for b_id in team_b_ids:
                 ra = ratings.get(a_id, _DEFAULT_RATING)
@@ -243,11 +300,11 @@ class PredictionService:
                 cross[(a_id, b_id)] = predict_win_rate(pa, pb, graph)
 
         results_a = [
-            _side_result(a_id, ratings.get(a_id, _DEFAULT_RATING), cross, team_b_ids, is_a=True, attr_prob="probability_a")
+            _side_result(a_id, ratings.get(a_id, _DEFAULT_RATING), cross, team_b_ids, is_a=True)
             for a_id in team_a_ids
         ]
         results_b = [
-            _side_result(b_id, ratings.get(b_id, _DEFAULT_RATING), cross, team_a_ids, is_a=False, attr_prob="probability_a")
+            _side_result(b_id, ratings.get(b_id, _DEFAULT_RATING), cross, team_a_ids, is_a=False)
             for b_id in team_b_ids
         ]
 
@@ -255,47 +312,4 @@ class PredictionService:
             match_type="doubles",
             team_a=PlayerPredictionList(players=results_a),
             team_b=PlayerPredictionList(players=results_b),
-        )
-
-
-# ── 纯函数：结果构建（可在测试中独立调用） ──
-
-
-def _build_result(
-    user_id: int,
-    snapshot: PlayerRatingSnapshot,
-    result,
-    is_a: bool,
-) -> PlayerPredictionResult:
-    """从 PredictionResult 构建 PlayerPredictionResult。"""
-    dr = result.direct_record
-    if is_a:
-        return PlayerPredictionResult(
-            user_id=user_id,
-            rating=snapshot.rating,
-            games=snapshot.games,
-            wins=snapshot.wins,
-            losses=snapshot.losses,
-            probability=result.probability_a,
-            elo_base_probability=result.elo_base_probability,
-            direct_adjustment=result.direct_adjustment,
-            indirect_adjustment=result.indirect_adjustment,
-            direct_record_wins=dr["wins"],
-            direct_record_losses=dr["losses"],
-            direct_record_total=dr["total"],
-        )
-    else:
-        return PlayerPredictionResult(
-            user_id=user_id,
-            rating=snapshot.rating,
-            games=snapshot.games,
-            wins=snapshot.wins,
-            losses=snapshot.losses,
-            probability=result.probability_b,
-            elo_base_probability=1.0 - result.elo_base_probability,
-            direct_adjustment=result.direct_adjustment,
-            indirect_adjustment=result.indirect_adjustment,
-            direct_record_wins=dr["losses"],
-            direct_record_losses=dr["wins"],
-            direct_record_total=dr["total"],
         )
