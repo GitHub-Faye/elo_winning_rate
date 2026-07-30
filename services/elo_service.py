@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional, Sequence
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +37,7 @@ from elo_compute import (
 )
 
 # 当前运动品类（后续可扩展为多品类）
-CURRENT_SPORT_TYPE = "badminton"
+CURRENT_SPORT = "badminton"
 
 
 @dataclass
@@ -83,59 +83,52 @@ class EloService:
         else:
             results_a, results_b = self._run_doubles(states_a, states_b, req, s_a, s_b)
 
-        # 持久化
+        # 持久化 + 构建响应
         played_at = req.played_at or datetime.now()
-        team_results_a = []
-        team_results_b = []
-
-        for state, result in zip(states_a, results_a):
-            self._save_record(req, state.user_id, result, "A", team_size,
-                              s_a > 0.5, states_b[0].user_id,
-                              states_b[1].user_id if team_size == 2 else None,
-                              req.score_a, req.score_b, played_at)
-            await self._upsert_rating(state, result)
-            team_results_a.append(self._build_result(state, result, "A", s_a > 0.5,
-                                                      states_b[0].user_id,
-                                                      states_b[1].user_id if team_size == 2 else None))
-
-        for state, result in zip(states_b, results_b):
-            self._save_record(req, state.user_id, result, "B", team_size,
-                              s_b > 0.5, states_a[0].user_id,
-                              states_a[1].user_id if team_size == 2 else None,
-                              req.score_b, req.score_a, played_at)
-            await self._upsert_rating(state, result)
-            team_results_b.append(self._build_result(state, result, "B", s_b > 0.5,
-                                                      states_a[0].user_id,
-                                                      states_a[1].user_id if team_size == 2 else None))
+        team_a_results = await self._process_team(
+            states_a, results_a, req, "A", s_a > 0.5, team_size,
+            states_b[0].user_id,
+            states_b[1].user_id if team_size == 2 else None,
+            req.score_a, req.score_b, played_at,
+        )
+        team_b_results = await self._process_team(
+            states_b, results_b, req, "B", s_b > 0.5, team_size,
+            states_a[0].user_id,
+            states_a[1].user_id if team_size == 2 else None,
+            req.score_b, req.score_a, played_at,
+        )
 
         await self.db.flush()
 
         return EloRecordResponse(
             success=True,
-            data=RecordData(team_a=team_results_a, team_b=team_results_b),
+            data=RecordData(team_a=team_a_results, team_b=team_b_results),
         )
 
     # ── 从 DB 加载选手状态 ──
 
     async def _load_player_states(self, user_ids: list[int]) -> list[_PlayerState]:
-        """查询 DB 获取选手当前 Elo 分，不存在的选手使用默认值。"""
+        """批量查询 DB 获取选手当前 Elo 分，不存在的选手使用默认值。"""
+        stmt = select(EloPlayerRating).where(
+            EloPlayerRating.user_id.in_(user_ids),
+            EloPlayerRating.sport_type == CURRENT_SPORT,
+        )
+        result_db = await self.db.execute(stmt)
+        rows = result_db.scalars().all()
+        rating_map = {r.user_id: r for r in rows}
+
         states: list[_PlayerState] = []
         for uid in user_ids:
-            stmt = select(EloPlayerRating).where(
-                EloPlayerRating.user_id == uid,
-                EloPlayerRating.sport_type == "badminton",
-            )
-            result_db = await self.db.execute(stmt)
-            rating = result_db.scalar_one_or_none()
-            if rating is None:
+            r = rating_map.get(uid)
+            if r is None:
                 states.append(_PlayerState(uid, 1500.0, 0, 0, 0))
             else:
                 states.append(_PlayerState(
                     uid,
-                    float(rating.rating),
-                    rating.games,
-                    rating.wins,
-                    rating.losses,
+                    float(r.rating),
+                    r.games,
+                    r.wins,
+                    r.losses,
                 ))
         return states
 
@@ -144,7 +137,7 @@ class EloService:
     def _run_singles(
         self, states_a: list[_PlayerState], states_b: list[_PlayerState],
         req: EloRecordRequest, s_a: float, s_b: float,
-    ) -> tuple[tuple[EloResult, EloResult], tuple[EloResult, EloResult]]:
+    ) -> tuple[list[EloResult], list[EloResult]]:
         """执行单打 Elo 计算，返回 (results_a, results_b)。"""
         s_a_side = SideInput(
             rating=states_a[0].rating, games=states_a[0].games, team_size=1,
@@ -158,7 +151,7 @@ class EloService:
             score_a=req.score_a, score_b=req.score_b, event_weight=req.event_weight,
         )
         r_a, r_b = compute_match_pair(s_a_side, s_b_side, match, self.config)
-        return (r_a,), (r_b,)
+        return [r_a], [r_b]
 
     # ── 双打 ──
 
@@ -181,6 +174,36 @@ class EloService:
             score_a=req.score_a, score_b=req.score_b, event_weight=req.event_weight,
         )
         return compute_team_match(team_a, team_b, match, self.config)
+
+    # ── 队伍处理（提取公共逻辑） ──
+
+    async def _process_team(
+        self,
+        states: list[_PlayerState],
+        results: list[EloResult],
+        req: EloRecordRequest,
+        team_side: str,
+        is_winner: bool,
+        team_size: int,
+        opponent_user_id: int,
+        opponent_partner_id: Optional[int],
+        score_self: int,
+        score_opponent: int,
+        played_at: datetime,
+    ) -> list[PlayerResult]:
+        """对一方的所有队员：写 record + 更新 rating + 构建响应。"""
+        player_results = []
+        for state, result in zip(states, results):
+            self._save_record(req, state.user_id, result, team_side,
+                              team_size, is_winner,
+                              opponent_user_id, opponent_partner_id,
+                              score_self, score_opponent, played_at)
+            await self._upsert_rating(state, result)
+            player_results.append(self._build_result(
+                state, result, team_side, is_winner,
+                opponent_user_id, opponent_partner_id,
+            ))
+        return player_results
 
     # ── 数据库写入 ──
 
@@ -233,7 +256,7 @@ class EloService:
         """更新或创建选手 Elo 评分。"""
         stmt = select(EloPlayerRating).where(
             EloPlayerRating.user_id == player.user_id,
-            EloPlayerRating.sport_type == "badminton",
+            EloPlayerRating.sport_type == CURRENT_SPORT,
         )
         result_db = await self.db.execute(stmt)
         rating = result_db.scalar_one_or_none()
@@ -244,7 +267,7 @@ class EloService:
         if rating is None:
             new_rating = EloPlayerRating(
                 user_id=player.user_id,
-                sport_type="badminton",
+                sport_type=CURRENT_SPORT,
                 rating=Decimal(str(result.rating_after)).quantize(Decimal("0.01")),
                 games=result.games_after,
                 wins=result.wins_after,

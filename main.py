@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from routers import router as elo_router
+from routers.elo import router as elo_router
 
 app = FastAPI(title="ELO Winning Rate")
 app.include_router(elo_router, prefix="")

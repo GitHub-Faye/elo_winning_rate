@@ -9,25 +9,66 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.schemas import EloRecordRequest
-from services import EloService
+from services.elo_service import EloService
 
 
 @pytest.fixture
 def mock_db() -> AsyncMock:
-    """创建一个 mock 的 AsyncSession。"""
-    db = AsyncMock(spec=AsyncSession)
-    db.add = MagicMock()
-    db.flush = AsyncMock()
-
-    execute_result = MagicMock()
-    execute_result.scalar_one_or_none.return_value = None
-    db.execute = AsyncMock(return_value=execute_result)
-    return db
+    """创建一个 mock 的 AsyncSession（所有选手默认新选手）。"""
+    return _make_mock_db_all_new()
 
 
 @pytest.fixture
 def service(mock_db: AsyncMock) -> EloService:
     return EloService(mock_db)
+
+
+def _make_mock_db_all_new() -> AsyncMock:
+    """创建一个 mock DB：所有用户都无记录（scalars().all() → []）。"""
+    db = AsyncMock(spec=AsyncSession)
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+
+    exec_result = MagicMock()
+    exec_result.scalars().all.return_value = []
+    db.execute = AsyncMock(return_value=exec_result)
+    return db
+
+
+def _mock_singles_db(
+    team_a_existing=None,
+    team_b_existing=None,
+) -> AsyncMock:
+    """创建单打场景的 mock DB。
+
+    execute 调用顺序（共 4 次）：
+        1. _load_player_states([1]): .scalars().all() → [team_a_existing] or []
+        2. _load_player_states([2]): .scalars().all() → [team_b_existing] or []
+        3. _upsert_rating(user_a): .scalar_one_or_none() → team_a_existing (or None)
+        4. _upsert_rating(user_b): .scalar_one_or_none() → team_b_existing (or None)
+    """
+    db = AsyncMock(spec=AsyncSession)
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+
+    # 第1次 execute: _load_player_states(team_a)
+    e1 = MagicMock()
+    e1.scalars().all.return_value = [team_a_existing] if team_a_existing else []
+
+    # 第2次 execute: _load_player_states(team_b)
+    e2 = MagicMock()
+    e2.scalars().all.return_value = [team_b_existing] if team_b_existing else []
+
+    # 第3次 execute: _upsert_rating(user_a)
+    e3 = MagicMock()
+    e3.scalar_one_or_none.return_value = team_a_existing
+
+    # 第4次 execute: _upsert_rating(user_b)
+    e4 = MagicMock()
+    e4.scalar_one_or_none.return_value = team_b_existing
+
+    db.execute = AsyncMock(side_effect=[e1, e2, e3, e4])
+    return db
 
 
 # ── 单打测试 ──
@@ -54,10 +95,6 @@ class TestSingles:
             event_weight=1.0,
         )
 
-    def _fake_rating(self, **kw):
-        """创建 SimpleNamespace 模拟 EloPlayerRating（新选手默认 None）。"""
-        return None
-
     @pytest.mark.asyncio
     async def test_singles_winner_gains_rating(self, service: EloService):
         """胜者加分，败者减分。"""
@@ -83,23 +120,17 @@ class TestSingles:
         assert rb.losses_after >= 0
 
     @pytest.mark.asyncio
-    async def test_singles_upset_bonus(self, service: EloService):
-        """定级期新人爆冷胜高段位 → 触发越级加分 bonus。
-        mock DB 返回新人 rating 低、games=0；对方高 rating、games=50。"""
+    async def test_singles_upset_bonus(self):
+        """定级期新人爆冷胜高段位 → 触发越级加分 bonus。"""
         existing_rating_b = SimpleNamespace(
             user_id=2, sport_type="badminton",
             rating=Decimal("1700.00"), games=50, wins=30, losses=20,
             draws=0, highest_rating=Decimal("1800.00"), lowest_rating=Decimal("1500.00"),
         )
-        # execute 顺序：load user1(None) → load user2(1700) → upsert user1(None) → upsert user2(1700)
-        exec_result_1 = MagicMock(); exec_result_1.scalar_one_or_none.return_value = None
-        exec_result_2 = MagicMock(); exec_result_2.scalar_one_or_none.return_value = existing_rating_b
-        exec_result_3 = MagicMock(); exec_result_3.scalar_one_or_none.return_value = None
-        exec_result_4 = MagicMock(); exec_result_4.scalar_one_or_none.return_value = existing_rating_b
-        mock_db = AsyncMock(spec=AsyncSession)
-        mock_db.add = MagicMock()
-        mock_db.flush = AsyncMock()
-        mock_db.execute = AsyncMock(side_effect=[exec_result_1, exec_result_2, exec_result_3, exec_result_4])
+        mock_db = _mock_singles_db(
+            team_a_existing=None,
+            team_b_existing=existing_rating_b,
+        )
         svc = EloService(mock_db)
 
         req = self._make_request(score_a=21, score_b=18)
@@ -112,22 +143,17 @@ class TestSingles:
         )
 
     @pytest.mark.asyncio
-    async def test_singles_upset_penalty(self, service: EloService):
+    async def test_singles_upset_penalty(self):
         """高段位输给定级新人 → 被越级扣分 penalty。"""
         existing_rating_a = SimpleNamespace(
             user_id=1, sport_type="badminton",
             rating=Decimal("1700.00"), games=50, wins=30, losses=20,
             draws=0, highest_rating=Decimal("1800.00"), lowest_rating=Decimal("1500.00"),
         )
-        # execute 顺序：load user1(1700) → load user2(None) → upsert user1(1700) → upsert user2(None)
-        exec_result_1 = MagicMock(); exec_result_1.scalar_one_or_none.return_value = existing_rating_a
-        exec_result_2 = MagicMock(); exec_result_2.scalar_one_or_none.return_value = None
-        exec_result_3 = MagicMock(); exec_result_3.scalar_one_or_none.return_value = existing_rating_a
-        exec_result_4 = MagicMock(); exec_result_4.scalar_one_or_none.return_value = None
-        mock_db = AsyncMock(spec=AsyncSession)
-        mock_db.add = MagicMock()
-        mock_db.flush = AsyncMock()
-        mock_db.execute = AsyncMock(side_effect=[exec_result_1, exec_result_2, exec_result_3, exec_result_4])
+        mock_db = _mock_singles_db(
+            team_a_existing=existing_rating_a,
+            team_b_existing=None,
+        )
         svc = EloService(mock_db)
 
         req = self._make_request(score_a=18, score_b=21)
@@ -139,21 +165,17 @@ class TestSingles:
         assert ra.upset_penalty > 0, f"输给定级新人应有 penalty，但={ra.upset_penalty}"
 
     @pytest.mark.asyncio
-    async def test_singles_new_player_high_k(self, service: EloService):
+    async def test_singles_new_player_high_k(self):
         """新选手 K=40，稳定期选手 K=20。"""
         existing_rating_b = SimpleNamespace(
             user_id=2, sport_type="badminton",
             rating=Decimal("1500.00"), games=50, wins=25, losses=25,
             draws=0, highest_rating=Decimal("1600.00"), lowest_rating=Decimal("1400.00"),
         )
-        exec_result_1 = MagicMock(); exec_result_1.scalar_one_or_none.return_value = None
-        exec_result_2 = MagicMock(); exec_result_2.scalar_one_or_none.return_value = existing_rating_b
-        exec_result_3 = MagicMock(); exec_result_3.scalar_one_or_none.return_value = None
-        exec_result_4 = MagicMock(); exec_result_4.scalar_one_or_none.return_value = existing_rating_b
-        mock_db = AsyncMock(spec=AsyncSession)
-        mock_db.add = MagicMock()
-        mock_db.flush = AsyncMock()
-        mock_db.execute = AsyncMock(side_effect=[exec_result_1, exec_result_2, exec_result_3, exec_result_4])
+        mock_db = _mock_singles_db(
+            team_a_existing=None,
+            team_b_existing=existing_rating_b,
+        )
         svc = EloService(mock_db)
 
         req = self._make_request(score_a=21, score_b=15)
@@ -245,24 +267,19 @@ class TestEdgeCases:
             await service.record_match(req)
 
     @pytest.mark.asyncio
-    async def test_existing_player_update(self, mock_db: AsyncMock):
+    async def test_existing_player_update(self):
         """已有选手 → 更新战绩而非新建。"""
         existing = SimpleNamespace(
             user_id=1, sport_type="badminton",
             rating=Decimal("1500.00"), games=10, wins=5, losses=5,
             draws=0, highest_rating=Decimal("1600.00"), lowest_rating=Decimal("1400.00"),
         )
-        exec_result_1 = MagicMock()
-        exec_result_1.scalar_one_or_none.return_value = existing
-        exec_result_2 = MagicMock()
-        exec_result_2.scalar_one_or_none.return_value = None
-        exec_result_3 = MagicMock()
-        exec_result_3.scalar_one_or_none.return_value = existing
-        exec_result_4 = MagicMock()
-        exec_result_4.scalar_one_or_none.return_value = None
-        mock_db.execute = AsyncMock(side_effect=[exec_result_1, exec_result_2, exec_result_3, exec_result_4])
-
+        mock_db = _mock_singles_db(
+            team_a_existing=existing,
+            team_b_existing=None,
+        )
         svc = EloService(mock_db)
+
         req = EloRecordRequest(
             event_id=1, battle_id=500, source_order=0,
             score_a=21, score_b=15,

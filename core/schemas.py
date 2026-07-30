@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── 请求模型 ──
@@ -18,16 +18,32 @@ class EloRecordRequest(BaseModel):
     event_id: int = Field(..., description="赛事ID")
     battle_id: int = Field(..., description="对阵ID")
     source_order: int = Field(0, description="赛事内场序号")
-    score_a: int = Field(..., description="A 方得分")
-    score_b: int = Field(..., description="B 方得分")
+    score_a: int = Field(..., ge=0, description="A 方得分（非负整数）")
+    score_b: int = Field(..., ge=0, description="B 方得分（非负整数）")
     team_a: list[int] = Field(
         ..., min_length=1, max_length=2, description="A 方选手 user_id 列表（1人=单打，2人=双打）"
     )
     team_b: list[int] = Field(
         ..., min_length=1, max_length=2, description="B 方选手 user_id 列表（1人=单打，2人=双打）"
     )
-    event_weight: float = Field(1.0, description="赛事权重")
+    event_weight: float = Field(1.0, gt=0, description="赛事权重（大于 0）")
     played_at: Optional[datetime] = Field(None, description="比赛时间")
+
+    @field_validator("score_a", "score_b")
+    @classmethod
+    def _check_score_non_negative(cls, v: int) -> int:
+        """比分必须非负。"""
+        if v < 0:
+            raise ValueError("比分不能为负数")
+        return v
+
+    @field_validator("event_weight")
+    @classmethod
+    def _check_weight_positive(cls, v: float) -> float:
+        """赛事权重必须大于 0。"""
+        if v <= 0:
+            raise ValueError("赛事权重必须大于 0")
+        return v
 
 
 # ── 响应模型 ──
