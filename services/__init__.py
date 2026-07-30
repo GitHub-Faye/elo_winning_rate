@@ -1,33 +1,50 @@
 """Elo 服务层 — 处理比赛结果记录和 Elo 计算
 
 核心职责：
-  1. 接收比赛结果（比分、选手列表）
-  2. 自动判断单打/双打，调用 elo_compute.py
-  3. 写入 elo_match_record
-  4. 更新 elo_player_rating
+  1. 接收比赛结果（比分、选手 ID 列表）
+  2. 查询 DB 获取选手当前 Elo 分（新选手用默认值）
+  3. 自动判断单打/双打，调用 elo_compute.py
+  4. 写入 elo_match_record
+  5. 更新 elo_player_rating
 
 通过依赖注入 AsyncSession 实现可测试性。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import EloMatchRecord, EloPlayerRating
-from core.schemas import EloRecordRequest, EloPlayerRecord, EloRecordResponse, PlayerInput
+from core.schemas import (
+    EloRecordRequest,
+    EloRecordResponse,
+    PlayerResult,
+    RecordData,
+)
 from elo_compute import (
     EloConfig,
+    EloResult,
+    MatchInput,
     SideInput,
     TeamInput,
-    MatchInput,
     compute_match_pair,
     compute_team_match,
-    EloResult,
 )
+
+
+@dataclass
+class _PlayerState:
+    """选手的赛前状态（来自 DB 或默认值）"""
+    user_id: int
+    rating: float
+    games: int
+    wins: int
+    losses: int
 
 
 class EloService:
@@ -43,147 +60,142 @@ class EloService:
         """处理一场比赛，返回 Elo 变化记录。
 
         自动判断单打/双打：
-        - len(players)=1 → 单打，调用 compute_match_pair()
-        - len(players)=2 → 双打，调用 compute_team_match()
+        - len(team)=1 → 单打，调用 compute_match_pair()
+        - len(team)=2 → 双打，调用 compute_team_match()
         """
-        team_size = len(req.players_a)
-        if team_size != len(req.players_b):
+        team_size = len(req.team_a)
+        if team_size != len(req.team_b):
             raise ValueError("双方人数不匹配")
-
-        if team_size == 1:
-            records = await self._handle_singles(req)
-        elif team_size == 2:
-            records = await self._handle_doubles(req)
-        else:
+        if team_size not in (1, 2):
             raise ValueError(f"不支持的队伍人数: {team_size}")
 
+        # 查询 DB 获取双方选手当前状态
+        states_a = await self._load_player_states(req.team_a)
+        states_b = await self._load_player_states(req.team_b)
+
+        s_a, s_b = _scores(req.score_a, req.score_b)
+
+        if team_size == 1:
+            results_a, results_b = self._run_singles(states_a, states_b, req, s_a, s_b)
+        else:
+            results_a, results_b = self._run_doubles(states_a, states_b, req, s_a, s_b)
+
+        # 持久化
+        played_at = req.played_at or datetime.now()
+        team_results_a = []
+        team_results_b = []
+
+        for state, result in zip(states_a, results_a):
+            self._save_record(req, state.user_id, result, "A", team_size,
+                              s_a > 0.5, states_b[0].user_id,
+                              states_b[1].user_id if team_size == 2 else None,
+                              req.score_a, req.score_b, played_at)
+            await self._upsert_rating(state, result)
+            team_results_a.append(self._build_result(state, result, "A", s_a > 0.5,
+                                                      states_b[0].user_id,
+                                                      states_b[1].user_id if team_size == 2 else None))
+
+        for state, result in zip(states_b, results_b):
+            self._save_record(req, state.user_id, result, "B", team_size,
+                              s_b > 0.5, states_a[0].user_id,
+                              states_a[1].user_id if team_size == 2 else None,
+                              req.score_b, req.score_a, played_at)
+            await self._upsert_rating(state, result)
+            team_results_b.append(self._build_result(state, result, "B", s_b > 0.5,
+                                                      states_a[0].user_id,
+                                                      states_a[1].user_id if team_size == 2 else None))
+
         await self.db.flush()
-        records.sort(key=lambda r: (r.team_side, r.user_id))
+
         return EloRecordResponse(
-            battle_id=req.battle_id,
-            records=records,
-            team_size=team_size,
+            success=True,
+            data=RecordData(team_a=team_results_a, team_b=team_results_b),
         )
 
-    # ── 单打处理 ──
+    # ── 从 DB 加载选手状态 ──
 
-    async def _handle_singles(self, req: EloRecordRequest) -> list[EloPlayerRecord]:
-        p_a = req.players_a[0]
-        p_b = req.players_b[0]
-
-        s_a, s_b = _scores(req.score_a, req.score_b)
-
-        side_a = SideInput(
-            rating=p_a.rating, games=p_a.games, team_size=1,
-            actual_score=s_a, wins=p_a.wins, losses=p_a.losses,
-        )
-        side_b = SideInput(
-            rating=p_b.rating, games=p_b.games, team_size=1,
-            actual_score=s_b, wins=p_b.wins, losses=p_b.losses,
-        )
-
-        match = MatchInput(
-            score_a=req.score_a,
-            score_b=req.score_b,
-            event_weight=req.event_weight,
-        )
-
-        result_a, result_b = compute_match_pair(side_a, side_b, match, self.config)
-
-        played_at = req.played_at or datetime.now()
-
-        rec_a = await self._save_and_upsert(
-            req=req, player=p_a, team_side="A",
-            is_winner=s_a > 0.5, team_size=1,
-            result=result_a, opponent_user_id=p_b.user_id,
-            opponent_partner_id=None,
-            score_self=req.score_a, score_opponent=req.score_b,
-            played_at=played_at,
-        )
-        rec_b = await self._save_and_upsert(
-            req=req, player=p_b, team_side="B",
-            is_winner=s_b > 0.5, team_size=1,
-            result=result_b, opponent_user_id=p_a.user_id,
-            opponent_partner_id=None,
-            score_self=req.score_b, score_opponent=req.score_a,
-            played_at=played_at,
-        )
-
-        return [rec_a, rec_b]
-
-    # ── 双打处理 ──
-
-    async def _handle_doubles(self, req: EloRecordRequest) -> list[EloPlayerRecord]:
-        p_a1, p_a2 = req.players_a[0], req.players_a[1]
-        p_b1, p_b2 = req.players_b[0], req.players_b[1]
-
-        s_a, s_b = _scores(req.score_a, req.score_b)
-
-        team_a = TeamInput(players=(
-            SideInput(rating=p_a1.rating, games=p_a1.games, team_size=2,
-                      actual_score=s_a, wins=p_a1.wins, losses=p_a1.losses),
-            SideInput(rating=p_a2.rating, games=p_a2.games, team_size=2,
-                      actual_score=s_a, wins=p_a2.wins, losses=p_a2.losses),
-        ))
-        team_b = TeamInput(players=(
-            SideInput(rating=p_b1.rating, games=p_b1.games, team_size=2,
-                      actual_score=s_b, wins=p_b1.wins, losses=p_b1.losses),
-            SideInput(rating=p_b2.rating, games=p_b2.games, team_size=2,
-                      actual_score=s_b, wins=p_b2.wins, losses=p_b2.losses),
-        ))
-
-        match = MatchInput(
-            score_a=req.score_a,
-            score_b=req.score_b,
-            event_weight=req.event_weight,
-        )
-
-        results_a, results_b = compute_team_match(team_a, team_b, match, self.config)
-
-        played_at = req.played_at or datetime.now()
-        records: list[EloPlayerRecord] = []
-
-        for player, result in zip(req.players_a, results_a):
-            rec = await self._save_and_upsert(
-                req=req, player=player, team_side="A",
-                is_winner=s_a > 0.5, team_size=2,
-                result=result, opponent_user_id=p_b1.user_id,
-                opponent_partner_id=p_b2.user_id,
-                score_self=req.score_a, score_opponent=req.score_b,
-                played_at=played_at,
+    async def _load_player_states(self, user_ids: list[int]) -> list[_PlayerState]:
+        """查询 DB 获取选手当前 Elo 分，不存在的选手使用默认值。"""
+        states: list[_PlayerState] = []
+        for uid in user_ids:
+            stmt = select(EloPlayerRating).where(
+                EloPlayerRating.user_id == uid,
+                EloPlayerRating.sport_type == "badminton",
             )
-            records.append(rec)
+            result_db = await self.db.execute(stmt)
+            rating = result_db.scalar_one_or_none()
+            if rating is None:
+                states.append(_PlayerState(uid, 1500.0, 0, 0, 0))
+            else:
+                states.append(_PlayerState(
+                    uid,
+                    float(rating.rating),
+                    rating.games,
+                    rating.wins,
+                    rating.losses,
+                ))
+        return states
 
-        for player, result in zip(req.players_b, results_b):
-            rec = await self._save_and_upsert(
-                req=req, player=player, team_side="B",
-                is_winner=s_b > 0.5, team_size=2,
-                result=result, opponent_user_id=p_a1.user_id,
-                opponent_partner_id=p_a2.user_id,
-                score_self=req.score_b, score_opponent=req.score_a,
-                played_at=played_at,
-            )
-            records.append(rec)
+    # ── 单打 ──
 
-        return records
+    def _run_singles(
+        self, states_a: list[_PlayerState], states_b: list[_PlayerState],
+        req: EloRecordRequest, s_a: float, s_b: float,
+    ) -> tuple[tuple[EloResult, EloResult], tuple[EloResult, EloResult]]:
+        """执行单打 Elo 计算，返回 (results_a, results_b)。"""
+        s_a_side = SideInput(
+            rating=states_a[0].rating, games=states_a[0].games, team_size=1,
+            actual_score=s_a, wins=states_a[0].wins, losses=states_a[0].losses,
+        )
+        s_b_side = SideInput(
+            rating=states_b[0].rating, games=states_b[0].games, team_size=1,
+            actual_score=s_b, wins=states_b[0].wins, losses=states_b[0].losses,
+        )
+        match = MatchInput(
+            score_a=req.score_a, score_b=req.score_b, event_weight=req.event_weight,
+        )
+        r_a, r_b = compute_match_pair(s_a_side, s_b_side, match, self.config)
+        return (r_a,), (r_b,)
 
-    # ── 数据库持久化 ──
+    # ── 双打 ──
 
-    async def _save_and_upsert(
+    def _run_doubles(
+        self, states_a: list[_PlayerState], states_b: list[_PlayerState],
+        req: EloRecordRequest, s_a: float, s_b: float,
+    ) -> tuple[list[EloResult], list[EloResult]]:
+        """执行双打 Elo 计算，返回 (results_a, results_b)。"""
+        team_a = TeamInput(players=tuple(
+            SideInput(rating=st.rating, games=st.games, team_size=2,
+                      actual_score=s_a, wins=st.wins, losses=st.losses)
+            for st in states_a
+        ))
+        team_b = TeamInput(players=tuple(
+            SideInput(rating=st.rating, games=st.games, team_size=2,
+                      actual_score=s_b, wins=st.wins, losses=st.losses)
+            for st in states_b
+        ))
+        match = MatchInput(
+            score_a=req.score_a, score_b=req.score_b, event_weight=req.event_weight,
+        )
+        return compute_team_match(team_a, team_b, match, self.config)
+
+    # ── 数据库写入 ──
+
+    def _save_record(
         self,
         req: EloRecordRequest,
-        player: PlayerInput,
-        team_side: str,
-        is_winner: bool,
-        team_size: int,
+        user_id: int,
         result: EloResult,
+        team_side: str,
+        team_size: int,
+        is_winner: bool,
         opponent_user_id: int,
         opponent_partner_id: Optional[int],
         score_self: int,
         score_opponent: int,
         played_at: datetime,
-    ) -> EloPlayerRecord:
-        """写入一条 elo_match_record 并更新 elo_player_rating。"""
+    ) -> None:
+        """写入一条 elo_match_record。"""
         rating_before = result.rating_after - result.delta
         bd = result.breakdown
 
@@ -191,7 +203,7 @@ class EloService:
             event_id=req.event_id,
             battle_id=req.battle_id,
             source_order=req.source_order,
-            user_id=player.user_id,
+            user_id=user_id,
             team_side=team_side,
             team_size=team_size,
             is_winner=1 if is_winner else 0,
@@ -213,28 +225,8 @@ class EloService:
             played_at=played_at,
         )
         self.db.add(record)
-        await self._upsert_rating(player, result)
 
-        return EloPlayerRecord(
-            user_id=player.user_id,
-            team_side=team_side,
-            is_winner=is_winner,
-            rating_before=rating_before,
-            delta=result.delta,
-            rating_after=result.rating_after,
-            expected=bd.expected,
-            k_factor=bd.k_factor,
-            weight_multiplier=bd.weight_multiplier,
-            margin_multiplier=bd.margin_multiplier,
-            base_delta=bd.base_delta,
-            clamped_delta=bd.clamped_delta,
-            upset_bonus=bd.upset_bonus,
-            upset_penalty=bd.upset_penalty,
-            opponent_user_id=opponent_user_id,
-            opponent_partner_id=opponent_partner_id,
-        )
-
-    async def _upsert_rating(self, player: PlayerInput, result: EloResult) -> None:
+    async def _upsert_rating(self, player: _PlayerState, result: EloResult) -> None:
         """更新或创建选手 Elo 评分。"""
         stmt = select(EloPlayerRating).where(
             EloPlayerRating.user_id == player.user_id,
@@ -269,6 +261,40 @@ class EloService:
                 rating.highest_rating = Decimal(str(result.rating_after)).quantize(Decimal("0.01"))
             if result.rating_after < float(rating.lowest_rating):
                 rating.lowest_rating = Decimal(str(result.rating_after)).quantize(Decimal("0.01"))
+
+    # ── 响应构建 ──
+
+    @staticmethod
+    def _build_result(
+        state: _PlayerState,
+        result: EloResult,
+        team_side: str,
+        is_winner: bool,
+        opponent_user_id: int,
+        opponent_partner_id: Optional[int],
+    ) -> PlayerResult:
+        """构建响应中的 PlayerResult。"""
+        rating_before = result.rating_after - result.delta
+        bd = result.breakdown
+        return PlayerResult(
+            user_id=state.user_id,
+            delta=result.delta,
+            rating_after=result.rating_after,
+            games_after=result.games_after,
+            wins_after=result.wins_after,
+            losses_after=result.losses_after,
+            rating_before=rating_before,
+            expected=bd.expected,
+            k_factor=bd.k_factor,
+            weight_multiplier=bd.weight_multiplier,
+            margin_multiplier=bd.margin_multiplier,
+            base_delta=bd.base_delta,
+            clamped_delta=bd.clamped_delta,
+            upset_bonus=bd.upset_bonus,
+            upset_penalty=bd.upset_penalty,
+            opponent_user_id=opponent_user_id,
+            opponent_partner_id=opponent_partner_id,
+        )
 
 
 # ── 辅助函数 ──

@@ -26,7 +26,6 @@ if config.config_file_name is not None:
 from core.models import EloPlayerRating, EloMatchRecord  # noqa: F401
 # for 'autogenerate' support
 target_metadata = SQLModel.metadata
-
 # ---- 白名单：只管理这些表，不碰其他已有表 ----
 # 填入你在这个项目中定义/管理的表名
 YOUR_MANAGED_TABLES: set[str] = {
