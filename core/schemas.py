@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── 请求模型 ──
@@ -85,3 +85,72 @@ class EloRecordResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+# ── 预测模型 ──
+
+
+class PredictionRequest(BaseModel):
+    """胜率预测请求体"""
+    team_a: list[int] = Field(
+        ..., min_length=1, max_length=2,
+        description="A 方选手 user_id 列表（1人=单打，2人=双打）",
+    )
+    team_b: list[int] = Field(
+        ..., min_length=1, max_length=2,
+        description="B 方选手 user_id 列表（1人=单打，2人=双打）",
+    )
+
+    @model_validator(mode="after")
+    def _check_unique_ids(self) -> PredictionRequest:
+        """同一方不能有重复选手，双方不能有重叠选手。"""
+        if len(set(self.team_a)) != len(self.team_a):
+            raise ValueError("Team A 中有重复选手 ID")
+        if len(set(self.team_b)) != len(self.team_b):
+            raise ValueError("Team B 中有重复选手 ID")
+        if set(self.team_a) & set(self.team_b):
+            raise ValueError("双方不能有相同的选手 ID")
+        return self
+
+
+class PlayerPredictionResult(BaseModel):
+    """单名选手的胜率预测结果"""
+    user_id: int
+    rating: float
+    games: int
+    wins: int
+    losses: int
+    probability: float
+    """最终预测胜率（clamp 后）"""
+    elo_base_probability: float
+    """Elo 基础胜率"""
+    direct_adjustment: float
+    """直接交手修正值"""
+    indirect_adjustment: float
+    """间接关系修正值"""
+    direct_record_wins: int
+    """对该方选手的直接交手胜场"""
+    direct_record_losses: int
+    """对该方选手的直接交手负场"""
+    direct_record_total: int
+    """对该方选手的总交手场次"""
+
+
+class PlayerPredictionList(BaseModel):
+    """一方队伍的预测结果列表"""
+    players: list[PlayerPredictionResult]
+
+
+class PredictionData(BaseModel):
+    """完整的预测响应数据"""
+    match_type: str = Field(
+        ..., description="比赛类型: singles / doubles",
+    )
+    team_a: PlayerPredictionList
+    team_b: PlayerPredictionList
+
+
+class PredictionResponse(BaseModel):
+    """胜率预测响应体"""
+    success: bool = True
+    data: PredictionData
