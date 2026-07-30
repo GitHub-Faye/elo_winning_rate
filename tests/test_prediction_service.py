@@ -105,11 +105,10 @@ class TestDoubles:
 
     @pytest.mark.asyncio
     async def test_doubles_probability_invariants(self, service: PredictionService):
-        """双打各方选手胜率之和 = 2（4 人各有一个对面胜率，合计应跨队配对和为 2）。"""
+        """双打双方概率之和 ≈ 1（取各队最高 Elo 者预测，结果复制给全队）。"""
         resp = await service.predict(self._make_request())
         pa = [p.probability for p in resp.data.team_a.players]
         pb = [p.probability for p in resp.data.team_b.players]
-        # 每个 A 选手概率 + 其对面的 B 选手概率 ≈ 1（平均值意义上）
         for a_prob, b_prob in zip(pa, pb):
             assert abs(a_prob + b_prob - 1.0) < 0.001, f"a={a_prob}, b={b_prob}"
 

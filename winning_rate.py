@@ -19,7 +19,7 @@ from dataclasses import dataclass
 # 常量
 # ──────────────────────────────────────────────
 
-MAX_INDIRECT_DEPTH = 5
+MAX_INDIRECT_DEPTH = 2
 """最大间接关系搜索深度。"""
 
 

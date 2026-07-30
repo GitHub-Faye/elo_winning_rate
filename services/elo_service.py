@@ -99,6 +99,7 @@ class EloService:
         )
 
         await self.db.flush()
+        await self.db.commit()
 
         return EloRecordResponse(
             success=True,

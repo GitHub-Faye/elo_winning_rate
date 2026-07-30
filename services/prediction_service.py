@@ -5,7 +5,7 @@
   2. 查询 DB 获取选手当前 Elo 分
   3. 从比赛记录构建选手胜负关系图
   4. 调用 winning_rate.py 预测胜率
-  5. 双打时两两配对后取平均
+  5. 双打时各队取 Elo 最高的选手代表全队预测
 
 通过依赖注入 AsyncSession 实现可测试性。
 """
@@ -141,37 +141,6 @@ def _to_player_record(user_id: int, snapshot: PlayerRatingSnapshot) -> PlayerRec
     )
 
 
-def _side_result(
-    pid: int,
-    snapshot: PlayerRatingSnapshot,
-    cross: dict[tuple[int, int], PredictionResult],
-    side_ids: list[int],
-    is_a: bool,
-) -> PlayerPredictionResult:
-    """构建一方选手的双打平均预测结果（Team A 或 Team B，通过 is_a 控制方向）。"""
-    pairs = [cross[(pid, oid)] if is_a else cross[(oid, pid)] for oid in side_ids]
-    views = [_view_for_side(p, is_a) for p in pairs]
-
-    return PlayerPredictionResult(
-        user_id=pid,
-        rating=snapshot.rating,
-        games=snapshot.games,
-        wins=snapshot.wins,
-        losses=snapshot.losses,
-        probability=_avg([v.probability for v in views]),
-        elo_base_probability=_avg([v.elo_base_probability for v in views]),
-        direct_adjustment=_avg([v.direct_adjustment for v in views]),
-        indirect_adjustment=_avg([v.indirect_adjustment for v in views]),
-        direct_record_wins=sum(v.direct_record_wins for v in views),
-        direct_record_losses=sum(v.direct_record_losses for v in views),
-        direct_record_total=sum(v.direct_record_total for v in views),
-    )
-
-
-def _avg(values: list[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
-
-
 def _build_result(
     user_id: int,
     snapshot: PlayerRatingSnapshot,
@@ -288,23 +257,23 @@ class PredictionService:
         ratings: dict[int, PlayerRatingSnapshot],
         graph: RelationGraph,
     ) -> PredictionData:
-        """双打预测：两两配对后取各选手平均胜率。"""
-        # 两两配对预测
-        cross: dict[tuple[int, int], PredictionResult] = {}
-        for a_id in team_a_ids:
-            for b_id in team_b_ids:
-                ra = ratings.get(a_id, _DEFAULT_RATING)
-                rb = ratings.get(b_id, _DEFAULT_RATING)
-                pa = _to_player_record(a_id, ra)
-                pb = _to_player_record(b_id, rb)
-                cross[(a_id, b_id)] = predict_win_rate(pa, pb, graph)
+        """双打预测：每队取 Elo 最高的选手代表全队预测。"""
+        # 选出各队 Elo 最高的选手
+        rep_a_id = max(team_a_ids, key=lambda uid: ratings.get(uid, _DEFAULT_RATING).rating)
+        rep_b_id = max(team_b_ids, key=lambda uid: ratings.get(uid, _DEFAULT_RATING).rating)
+
+        ra = ratings.get(rep_a_id, _DEFAULT_RATING)
+        rb = ratings.get(rep_b_id, _DEFAULT_RATING)
+        pa = _to_player_record(rep_a_id, ra)
+        pb = _to_player_record(rep_b_id, rb)
+        result = predict_win_rate(pa, pb, graph)
 
         results_a = [
-            _side_result(a_id, ratings.get(a_id, _DEFAULT_RATING), cross, team_b_ids, is_a=True)
+            _build_result(a_id, ratings.get(a_id, _DEFAULT_RATING), result, is_a=True)
             for a_id in team_a_ids
         ]
         results_b = [
-            _side_result(b_id, ratings.get(b_id, _DEFAULT_RATING), cross, team_a_ids, is_a=False)
+            _build_result(b_id, ratings.get(b_id, _DEFAULT_RATING), result, is_a=False)
             for b_id in team_b_ids
         ]
 
