@@ -188,3 +188,59 @@ class HeadToHeadResponse(BaseModel):
     """交手记录响应"""
     success: bool = True
     data: HeadToHeadData
+
+
+# ── 积分查询模型 ──
+
+
+class RatingQueryRequest(BaseModel):
+    """按身份证号批量查询积分请求体"""
+    card_codes: list[str] = Field(
+        ..., min_length=1, max_length=50,
+        description="选手身份证号列表（去重，最多 50 个）",
+    )
+
+    @model_validator(mode="after")
+    def _dedupe_card_codes(self) -> RatingQueryRequest:
+        """去除重复身份证号（同一选手只查一次）。"""
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for code in self.card_codes:
+            if code not in seen:
+                seen.add(code)
+                deduped.append(code)
+        self.card_codes = deduped
+        return self
+
+
+class PlayerRatingResult(BaseModel):
+    """单名选手的积分查询结果"""
+    card_code: str
+    """选手身份证号"""
+    rating: Optional[float] = None
+    """当前 Elo 分（未建档选手为 null）"""
+    games: Optional[int] = None
+    """总比赛场次"""
+    wins: Optional[int] = None
+    """胜场"""
+    losses: Optional[int] = None
+    """负场"""
+    rank: Optional[str] = None
+    """段位（1段-9段；场次<2 为「定级中」；未建档为 null）"""
+    is_provisional: bool = False
+    """是否处于定级期（场次 < 2）"""
+    is_new: bool = False
+    """是否未建档（无 elo_player_rating 记录）"""
+
+
+class RatingQueryData(BaseModel):
+    """批量积分查询数据"""
+    sport_type: str
+    """运动品类（如 badminton）"""
+    results: list[PlayerRatingResult]
+
+
+class RatingQueryResponse(BaseModel):
+    """积分查询响应体"""
+    success: bool = True
+    data: RatingQueryData
