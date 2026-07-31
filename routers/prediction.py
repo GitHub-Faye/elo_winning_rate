@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/v1/prediction", tags=["prediction"])
         400: {"model": ErrorResponse, "description": "请求参数错误（如人数不匹配）"},
     },
     summary="预测一场比赛的胜率",
-    description="""接收双方选手 ID，自动判断单打/双打：
+    description="""接收双方选手身份证号，自动判断单打/双打：
 
 - `team_a`/`team_b` 各 1 人 = 单打
 - `team_a`/`team_b` 各 2 人 = 双打

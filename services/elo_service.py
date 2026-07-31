@@ -43,7 +43,7 @@ CURRENT_SPORT = "badminton"
 @dataclass
 class _PlayerState:
     """选手的赛前状态（来自 DB 或默认值）"""
-    user_id: int
+    card_code: str
     rating: float
     games: int
     wins: int
@@ -87,14 +87,14 @@ class EloService:
         played_at = req.played_at or datetime.now()
         team_a_results = await self._process_team(
             states_a, results_a, req, "A", s_a > 0.5, team_size,
-            states_b[0].user_id,
-            states_b[1].user_id if team_size == 2 else None,
+            states_b[0].card_code,
+            states_b[1].card_code if team_size == 2 else None,
             req.score_a, req.score_b, played_at,
         )
         team_b_results = await self._process_team(
             states_b, results_b, req, "B", s_b > 0.5, team_size,
-            states_a[0].user_id,
-            states_a[1].user_id if team_size == 2 else None,
+            states_a[0].card_code,
+            states_a[1].card_code if team_size == 2 else None,
             req.score_b, req.score_a, played_at,
         )
 
@@ -108,24 +108,24 @@ class EloService:
 
     # ── 从 DB 加载选手状态 ──
 
-    async def _load_player_states(self, user_ids: list[int]) -> list[_PlayerState]:
+    async def _load_player_states(self, card_codes: list[str]) -> list[_PlayerState]:
         """批量查询 DB 获取选手当前 Elo 分，不存在的选手使用默认值。"""
         stmt = select(EloPlayerRating).where(
-            EloPlayerRating.user_id.in_(user_ids),
+            EloPlayerRating.card_code.in_(card_codes),
             EloPlayerRating.sport_type == CURRENT_SPORT,
         )
         result_db = await self.db.execute(stmt)
         rows = result_db.scalars().all()
-        rating_map = {r.user_id: r for r in rows}
+        rating_map = {r.card_code: r for r in rows}
 
         states: list[_PlayerState] = []
-        for uid in user_ids:
-            r = rating_map.get(uid)
+        for code in card_codes:
+            r = rating_map.get(code)
             if r is None:
-                states.append(_PlayerState(uid, 1500.0, 0, 0, 0))
+                states.append(_PlayerState(code, 1500.0, 0, 0, 0))
             else:
                 states.append(_PlayerState(
-                    uid,
+                    code,
                     float(r.rating),
                     r.games,
                     r.wins,
@@ -186,8 +186,8 @@ class EloService:
         team_side: str,
         is_winner: bool,
         team_size: int,
-        opponent_user_id: int,
-        opponent_partner_id: Optional[int],
+        opponent_card_code: str,
+        opponent_partner_card_code: Optional[str],
         score_self: int,
         score_opponent: int,
         played_at: datetime,
@@ -195,14 +195,14 @@ class EloService:
         """对一方的所有队员：写 record + 更新 rating + 构建响应。"""
         player_results = []
         for state, result in zip(states, results):
-            self._save_record(req, state.user_id, result, team_side,
+            self._save_record(req, state.card_code, result, team_side,
                               team_size, is_winner,
-                              opponent_user_id, opponent_partner_id,
+                              opponent_card_code, opponent_partner_card_code,
                               score_self, score_opponent, played_at)
             await self._upsert_rating(state, result)
             player_results.append(self._build_result(
                 state, result, team_side, is_winner,
-                opponent_user_id, opponent_partner_id,
+                opponent_card_code, opponent_partner_card_code,
             ))
         return player_results
 
@@ -211,13 +211,13 @@ class EloService:
     def _save_record(
         self,
         req: EloRecordRequest,
-        user_id: int,
+        card_code: str,
         result: EloResult,
         team_side: str,
         team_size: int,
         is_winner: bool,
-        opponent_user_id: int,
-        opponent_partner_id: Optional[int],
+        opponent_card_code: str,
+        opponent_partner_card_code: Optional[str],
         score_self: int,
         score_opponent: int,
         played_at: datetime,
@@ -230,7 +230,7 @@ class EloService:
             event_id=req.event_id,
             battle_id=req.battle_id,
             source_order=req.source_order,
-            user_id=user_id,
+            card_code=card_code,
             team_side=team_side,
             team_size=team_size,
             is_winner=1 if is_winner else 0,
@@ -245,8 +245,8 @@ class EloService:
             clamped_delta=Decimal(str(bd.clamped_delta)).quantize(Decimal("0.01")),
             upset_bonus=Decimal(str(bd.upset_bonus)).quantize(Decimal("0.01")),
             upset_penalty=Decimal(str(bd.upset_penalty)).quantize(Decimal("0.01")),
-            opponent_user_id=opponent_user_id,
-            opponent_partner_id=opponent_partner_id,
+            opponent_card_code=opponent_card_code,
+            opponent_partner_card_code=opponent_partner_card_code,
             score_self=score_self,
             score_opponent=score_opponent,
             played_at=played_at,
@@ -256,7 +256,7 @@ class EloService:
     async def _upsert_rating(self, player: _PlayerState, result: EloResult) -> None:
         """更新或创建选手 Elo 评分。"""
         stmt = select(EloPlayerRating).where(
-            EloPlayerRating.user_id == player.user_id,
+            EloPlayerRating.card_code == player.card_code,
             EloPlayerRating.sport_type == CURRENT_SPORT,
         )
         result_db = await self.db.execute(stmt)
@@ -267,7 +267,7 @@ class EloService:
 
         if rating is None:
             new_rating = EloPlayerRating(
-                user_id=player.user_id,
+                card_code=player.card_code,
                 sport_type=CURRENT_SPORT,
                 rating=Decimal(str(result.rating_after)).quantize(Decimal("0.01")),
                 games=result.games_after,
@@ -297,14 +297,14 @@ class EloService:
         result: EloResult,
         team_side: str,
         is_winner: bool,
-        opponent_user_id: int,
-        opponent_partner_id: Optional[int],
+        opponent_card_code: str,
+        opponent_partner_card_code: Optional[str],
     ) -> PlayerResult:
         """构建响应中的 PlayerResult。"""
         rating_before = result.rating_after - result.delta
         bd = result.breakdown
         return PlayerResult(
-            user_id=state.user_id,
+            card_code=state.card_code,
             delta=result.delta,
             rating_after=result.rating_after,
             games_after=result.games_after,
@@ -319,8 +319,8 @@ class EloService:
             clamped_delta=bd.clamped_delta,
             upset_bonus=bd.upset_bonus,
             upset_penalty=bd.upset_penalty,
-            opponent_user_id=opponent_user_id,
-            opponent_partner_id=opponent_partner_id,
+            opponent_card_code=opponent_card_code,
+            opponent_partner_card_code=opponent_partner_card_code,
         )
 
 

@@ -15,6 +15,12 @@ from services.prediction_service import (
     _view_for_side,
 )
 
+# 测试用身份证号
+CARD_A = "110101199001011234"
+CARD_B = "110101199202024567"
+CARD_C = "110101199303036789"
+CARD_D = "110101199404041122"
+
 
 @pytest.fixture
 def mock_db() -> AsyncMock:
@@ -24,7 +30,7 @@ def mock_db() -> AsyncMock:
     # _load_player_ratings: scalars().all() → []
     ex1 = MagicMock()
     ex1.scalars().all.return_value = []
-    # _build_relation_graph_async: 两个查询，都返回空
+    # _build_relation_graph: 两个查询，都返回空
     ex2 = MagicMock()
     ex2.scalars().all.return_value = []
     ex3 = MagicMock()
@@ -42,7 +48,7 @@ def service(mock_db: AsyncMock) -> PredictionService:
 class TestSingles:
     """单打预测测试"""
 
-    def _make_request(self, team_a=(1,), team_b=(2,)) -> PredictionRequest:
+    def _make_request(self, team_a=(CARD_A,), team_b=(CARD_B,)) -> PredictionRequest:
         return PredictionRequest(team_a=list(team_a), team_b=list(team_b))
 
     @pytest.mark.asyncio
@@ -73,7 +79,7 @@ class TestSingles:
         """响应包含所有必要字段。"""
         resp = await service.predict(self._make_request())
         p = resp.data.team_a.players[0]
-        assert p.user_id == 1
+        assert p.card_code == CARD_A
         assert p.rating == 1500.0
         assert p.games == 0
         assert p.wins == 0
@@ -88,7 +94,7 @@ class TestDoubles:
     """双打预测测试"""
 
     def _make_request(self) -> PredictionRequest:
-        return PredictionRequest(team_a=[1, 2], team_b=[3, 4])
+        return PredictionRequest(team_a=[CARD_A, CARD_B], team_b=[CARD_C, CARD_D])
 
     @pytest.mark.asyncio
     async def test_doubles_returns_four_results(self, service: PredictionService):
@@ -118,14 +124,14 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_team_size_mismatch(self, service: PredictionService):
         """双方人数不匹配 → ValueError。"""
-        req = PredictionRequest(team_a=[1], team_b=[2, 3])
+        req = PredictionRequest(team_a=[CARD_A], team_b=[CARD_B, CARD_C])
         with pytest.raises(ValueError, match="人数不匹配"):
             await service.predict(req)
 
     @pytest.mark.asyncio
     async def test_success_envelope(self, service: PredictionService):
         """响应包含 success=True 和 data。"""
-        req = PredictionRequest(team_a=[1], team_b=[2])
+        req = PredictionRequest(team_a=[CARD_A], team_b=[CARD_B])
         resp = await service.predict(req)
         assert resp.success is True
         assert resp.data is not None
@@ -135,22 +141,22 @@ class TestEdgeCases:
     def test_unsupported_team_size(self):
         """人数不在 1-2 之间（Pydantic max_length 校验）。"""
         with pytest.raises(ValidationError, match="at most 2"):
-            PredictionRequest(team_a=[1, 2, 3], team_b=[4, 5, 6])
+            PredictionRequest(team_a=[CARD_A, CARD_B, CARD_C], team_b=[CARD_D, CARD_A, CARD_B])
 
     def test_duplicate_id_in_team_a_rejected(self):
-        """Team A 中重复 ID → ValidationError。"""
+        """Team A 中重复身份证 → ValidationError。"""
         with pytest.raises(ValidationError, match="重复"):
-            PredictionRequest(team_a=[1, 1], team_b=[2, 3])
+            PredictionRequest(team_a=[CARD_A, CARD_A], team_b=[CARD_B, CARD_C])
 
     def test_duplicate_id_in_team_b_rejected(self):
-        """Team B 中重复 ID → ValidationError。"""
+        """Team B 中重复身份证 → ValidationError。"""
         with pytest.raises(ValidationError, match="重复"):
-            PredictionRequest(team_a=[1, 2], team_b=[3, 3])
+            PredictionRequest(team_a=[CARD_A, CARD_B], team_b=[CARD_C, CARD_C])
 
     def test_overlap_across_teams_rejected(self):
         """双方有相同选手 → ValidationError。"""
         with pytest.raises(ValidationError, match="相同"):
-            PredictionRequest(team_a=[1], team_b=[1])
+            PredictionRequest(team_a=[CARD_A], team_b=[CARD_A])
 
 
 class TestRelationGraph:
@@ -158,8 +164,8 @@ class TestRelationGraph:
 
     def _make_record(
         self,
-        user_id: int = 1,
-        opponent_user_id: int = 2,
+        card_code: str = CARD_A,
+        opponent_card_code: str = CARD_B,
         is_winner: int = 1,
         rating_before: float = 1500.0,
         delta: float = 10.0,
@@ -167,8 +173,8 @@ class TestRelationGraph:
         """构造一条简单的 EloMatchRecord。"""
         from types import SimpleNamespace
         return SimpleNamespace(
-            user_id=user_id,
-            opponent_user_id=opponent_user_id,
+            card_code=card_code,
+            opponent_card_code=opponent_card_code,
             is_winner=is_winner,
             event_id=1,
             battle_id=1,
@@ -191,8 +197,8 @@ class TestRelationGraph:
 
         execute 调用顺序:
           1. _load_player_ratings: scalars().all() → []
-          2. _build_relation_graph_async 第1层: scalars().all() → records1
-          3. _build_relation_graph_async 第2层: scalars().all() → records2 or []
+          2. build_relation_graph 第1层: scalars().all() → records1
+          3. build_relation_graph 第2层: scalars().all() → records2 or []
         """
         db = AsyncMock(spec=AsyncSession)
 
@@ -211,11 +217,11 @@ class TestRelationGraph:
     @pytest.mark.asyncio
     async def test_singles_with_direct_record(self):
         """有直接交手记录 → direct_record_total > 0。"""
-        rec = self._make_record(user_id=1, opponent_user_id=2, is_winner=1)
+        rec = self._make_record(card_code=CARD_A, opponent_card_code=CARD_B, is_winner=1)
         db = self._make_db_with_records([rec])
         svc = PredictionService(db)
 
-        req = PredictionRequest(team_a=[1], team_b=[2])
+        req = PredictionRequest(team_a=[CARD_A], team_b=[CARD_B])
         resp = await svc.predict(req)
 
         p1 = resp.data.team_a.players[0]
@@ -282,9 +288,9 @@ class TestBuildResult:
             direct_record={"wins": 3, "losses": 1, "total": 4},
         )
         snapshot = PlayerRatingSnapshot(rating=1600.0, games=20, wins=12, losses=8)
-        pr = _build_result(1, snapshot, result, is_a=True)
+        pr = _build_result(CARD_A, snapshot, result, is_a=True)
 
-        assert pr.user_id == 1
+        assert pr.card_code == CARD_A
         assert pr.rating == 1600.0
         assert pr.probability == 0.75
         assert pr.elo_base_probability == 0.6
@@ -292,7 +298,7 @@ class TestBuildResult:
         assert pr.direct_record_losses == 1
         assert pr.direct_record_total == 4
 
-        pr_b = _build_result(2, snapshot, result, is_a=False)
+        pr_b = _build_result(CARD_B, snapshot, result, is_a=False)
         assert pr_b.probability == 0.25
         assert pr_b.direct_record_wins == 1  # flipped
         assert pr_b.direct_record_losses == 3

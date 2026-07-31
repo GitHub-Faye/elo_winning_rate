@@ -26,7 +26,7 @@ def upgrade() -> None:
     sa.Column('event_id', mysql.INTEGER(), nullable=False, comment='赛事ID，逻辑外键 → motion_event.event_id（数据链路保证，不设数据库 FK）'),
     sa.Column('battle_id', mysql.INTEGER(), nullable=False, comment='对阵ID，逻辑外键 → motion_event_layout_stage_battle.battle_id（同上）'),
     sa.Column('source_order', mysql.INTEGER(), nullable=False, comment='赛事内场序号（event_index），用于回放排序'),
-    sa.Column('user_id', mysql.BIGINT(), nullable=True, comment='选手用户ID'),
+    sa.Column('card_code', mysql.VARCHAR(length=32), nullable=False, comment='选手身份证号'),
     sa.Column('team_side', mysql.VARCHAR(length=1), nullable=False, comment='所在方 A 或 B'),
     sa.Column('team_size', mysql.TINYINT(), nullable=False, comment='队内人数 1=单打 2=双打'),
     sa.Column('is_winner', mysql.TINYINT(), nullable=False, comment='本方是否获胜 1=是 0=否'),
@@ -41,8 +41,8 @@ def upgrade() -> None:
     sa.Column('clamped_delta', mysql.DECIMAL(precision=10, scale=2), nullable=False, comment='clamp 后的普通变化'),
     sa.Column('upset_bonus', mysql.DECIMAL(precision=10, scale=2), nullable=False, comment='越级加分 bonus'),
     sa.Column('upset_penalty', mysql.DECIMAL(precision=10, scale=2), nullable=False, comment='被越级扣分 penalty'),
-    sa.Column('opponent_user_id', mysql.BIGINT(), nullable=True, comment='对手用户ID（双打时为第一个对手）'),
-    sa.Column('opponent_partner_id', mysql.BIGINT(), nullable=True, comment='双打时第二个对手，单打为 NULL'),
+    sa.Column('opponent_card_code', mysql.VARCHAR(length=32), nullable=True, comment='对手身份证号（双打时为第一个对手）'),
+    sa.Column('opponent_partner_card_code', mysql.VARCHAR(length=32), nullable=True, comment='双打时第二个对手，单打为 NULL'),
     sa.Column('score_self', mysql.INTEGER(), nullable=False, comment='本方得分'),
     sa.Column('score_opponent', mysql.INTEGER(), nullable=False, comment='对方得分'),
     sa.Column('played_at', mysql.DATETIME(), nullable=True, comment='比赛时间（来自 battle_time，可为空）'),
@@ -50,7 +50,7 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('elo_player_rating',
-    sa.Column('user_id', mysql.BIGINT(), nullable=False, comment='用户ID，逻辑外键 → motion_user.user_id（数据链路保证，不设数据库 FK）'),
+    sa.Column('card_code', mysql.VARCHAR(length=32), nullable=False, comment='选手身份证号，逻辑外键 → motion_event_apply_user_setting.card_code（数据链路保证，不设数据库 FK）'),
     sa.Column('sport_type', mysql.VARCHAR(length=32), nullable=False, comment='运动品类，如 badminton / tabletennis'),
     sa.Column('rating', mysql.DECIMAL(precision=10, scale=2), nullable=False, comment='当前 Elo 分'),
     sa.Column('games', sa.Integer(), nullable=False, comment='总比赛场次'),
@@ -61,7 +61,7 @@ def upgrade() -> None:
     sa.Column('lowest_rating', mysql.DECIMAL(precision=10, scale=2), nullable=False, comment='历史最低 Elo 分'),
     sa.Column('created_at', mysql.DATETIME(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False, comment='创建时间'),
     sa.Column('updated_at', mysql.DATETIME(), server_default=sa.text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'), nullable=False, comment='更新时间'),
-    sa.PrimaryKeyConstraint('user_id', 'sport_type')
+    sa.PrimaryKeyConstraint('card_code', 'sport_type')
     )
     # ### end Alembic commands ###
 

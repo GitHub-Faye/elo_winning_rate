@@ -48,7 +48,7 @@ _DEFAULT_RATING = PlayerRatingSnapshot(1500.0, 0, 0, 0)
 
 
 async def build_relation_graph(
-    db: AsyncSession, player_ids: list[int],
+    db: AsyncSession, card_codes: list[str],
 ) -> RelationGraph:
     """从 elo_match_record 构建选手胜负关系图。
 
@@ -57,20 +57,20 @@ async def build_relation_graph(
     """
     # 第1层：输入选手的比赛记录
     stmt1 = select(EloMatchRecord).where(
-        EloMatchRecord.user_id.in_(player_ids),
+        EloMatchRecord.card_code.in_(card_codes),
     )
     result1 = await db.execute(stmt1)
     records1 = list(result1.scalars().all())
 
-    # 收集所有对手 ID
-    opponent_ids = {r.opponent_user_id for r in records1}
-    second_level = opponent_ids - set(player_ids)
+    # 收集所有对手身份证
+    opponent_codes = {r.opponent_card_code for r in records1}
+    second_level = opponent_codes - set(card_codes)
 
     # 第2层：对手的比赛记录
     records2: list[EloMatchRecord] = []
     if second_level:
         stmt2 = select(EloMatchRecord).where(
-            EloMatchRecord.user_id.in_(list(second_level)),
+            EloMatchRecord.card_code.in_(list(second_level)),
         )
         result2 = await db.execute(stmt2)
         records2 = list(result2.scalars().all())
@@ -78,8 +78,8 @@ async def build_relation_graph(
     # 聚合构建关系图
     raw: dict[str, dict[str, dict[str, int]]] = {}
     for r in records1 + records2:
-        uid = str(r.user_id)
-        opp = str(r.opponent_user_id)
+        uid = str(r.card_code)
+        opp = str(r.opponent_card_code)
         raw.setdefault(uid, {}).setdefault(opp, {"wins": 0, "losses": 0, "total": 0})
         raw[uid][opp]["total"] += 1
         if r.is_winner:
@@ -132,17 +132,17 @@ def _view_for_side(result: PredictionResult, is_a: bool) -> _SideView:
     )
 
 
-def _to_player_record(user_id: int, snapshot: PlayerRatingSnapshot) -> PlayerRecord:
+def _to_player_record(card_code: str, snapshot: PlayerRatingSnapshot) -> PlayerRecord:
     """从快照构建 PlayerRecord（用于 winning_rate.py 的纯函数接口）。"""
     return PlayerRecord(
-        player_id=str(user_id), name="",
+        player_id=card_code, name="",
         rating=snapshot.rating, games=snapshot.games,
         wins=snapshot.wins, losses=snapshot.losses,
     )
 
 
 def _build_result(
-    user_id: int,
+    card_code: str,
     snapshot: PlayerRatingSnapshot,
     result: PredictionResult,
     is_a: bool,
@@ -150,7 +150,7 @@ def _build_result(
     """从单条 PredictionResult 构建 PlayerPredictionResult。"""
     v = _view_for_side(result, is_a)
     return PlayerPredictionResult(
-        user_id=user_id,
+        card_code=card_code,
         rating=snapshot.rating,
         games=snapshot.games,
         wins=snapshot.wins,
@@ -184,9 +184,9 @@ class PredictionService:
         if team_size not in (1, 2):
             raise ValueError(f"不支持的队伍人数: {team_size}")
 
-        all_player_ids = list(set(req.team_a + req.team_b))
-        ratings = await self._load_player_ratings(all_player_ids)
-        graph = await build_relation_graph(self.db, all_player_ids)
+        all_cards = list(set(req.team_a + req.team_b))
+        ratings = await self._load_player_ratings(all_cards)
+        graph = await build_relation_graph(self.db, all_cards)
 
         if team_size == 1:
             data = self._predict_singles(
@@ -202,18 +202,18 @@ class PredictionService:
     # ── DB 查询 ──
 
     async def _load_player_ratings(
-        self, user_ids: list[int],
-    ) -> dict[int, PlayerRatingSnapshot]:
+        self, card_codes: list[str],
+    ) -> dict[str, PlayerRatingSnapshot]:
         """批量查询选手 Elo 评分，不存在的选手使用默认值。"""
         stmt = select(EloPlayerRating).where(
-            EloPlayerRating.user_id.in_(user_ids),
+            EloPlayerRating.card_code.in_(card_codes),
             EloPlayerRating.sport_type == CURRENT_SPORT,
         )
         result = await self.db.execute(stmt)
         rows = result.scalars().all()
-        ratings: dict[int, PlayerRatingSnapshot] = {}
+        ratings: dict[str, PlayerRatingSnapshot] = {}
         for r in rows:
-            ratings[r.user_id] = PlayerRatingSnapshot(
+            ratings[r.card_code] = PlayerRatingSnapshot(
                 rating=float(r.rating),
                 games=r.games,
                 wins=r.wins,
@@ -225,26 +225,26 @@ class PredictionService:
 
     def _predict_singles(
         self,
-        user_a: int,
-        user_b: int,
-        ratings: dict[int, PlayerRatingSnapshot],
+        card_a: str,
+        card_b: str,
+        ratings: dict[str, PlayerRatingSnapshot],
         graph: RelationGraph,
     ) -> PredictionData:
         """直接调用 predict_win_rate() 完成单打预测。"""
-        ra = ratings.get(user_a, _DEFAULT_RATING)
-        rb = ratings.get(user_b, _DEFAULT_RATING)
+        ra = ratings.get(card_a, _DEFAULT_RATING)
+        rb = ratings.get(card_b, _DEFAULT_RATING)
 
-        pa = _to_player_record(user_a, ra)
-        pb = _to_player_record(user_b, rb)
+        pa = _to_player_record(card_a, ra)
+        pb = _to_player_record(card_b, rb)
         result = predict_win_rate(pa, pb, graph)
 
         return PredictionData(
             match_type="singles",
             team_a=PlayerPredictionList(players=[
-                _build_result(user_a, ra, result, is_a=True),
+                _build_result(card_a, ra, result, is_a=True),
             ]),
             team_b=PlayerPredictionList(players=[
-                _build_result(user_b, rb, result, is_a=False),
+                _build_result(card_b, rb, result, is_a=False),
             ]),
         )
 
@@ -252,29 +252,29 @@ class PredictionService:
 
     def _predict_doubles(
         self,
-        team_a_ids: list[int],
-        team_b_ids: list[int],
-        ratings: dict[int, PlayerRatingSnapshot],
+        team_a_cards: list[str],
+        team_b_cards: list[str],
+        ratings: dict[str, PlayerRatingSnapshot],
         graph: RelationGraph,
     ) -> PredictionData:
         """双打预测：每队取 Elo 最高的选手代表全队预测。"""
         # 选出各队 Elo 最高的选手
-        rep_a_id = max(team_a_ids, key=lambda uid: ratings.get(uid, _DEFAULT_RATING).rating)
-        rep_b_id = max(team_b_ids, key=lambda uid: ratings.get(uid, _DEFAULT_RATING).rating)
+        rep_a = max(team_a_cards, key=lambda c: ratings.get(c, _DEFAULT_RATING).rating)
+        rep_b = max(team_b_cards, key=lambda c: ratings.get(c, _DEFAULT_RATING).rating)
 
-        ra = ratings.get(rep_a_id, _DEFAULT_RATING)
-        rb = ratings.get(rep_b_id, _DEFAULT_RATING)
-        pa = _to_player_record(rep_a_id, ra)
-        pb = _to_player_record(rep_b_id, rb)
+        ra = ratings.get(rep_a, _DEFAULT_RATING)
+        rb = ratings.get(rep_b, _DEFAULT_RATING)
+        pa = _to_player_record(rep_a, ra)
+        pb = _to_player_record(rep_b, rb)
         result = predict_win_rate(pa, pb, graph)
 
         results_a = [
-            _build_result(a_id, ratings.get(a_id, _DEFAULT_RATING), result, is_a=True)
-            for a_id in team_a_ids
+            _build_result(card, ratings.get(card, _DEFAULT_RATING), result, is_a=True)
+            for card in team_a_cards
         ]
         results_b = [
-            _build_result(b_id, ratings.get(b_id, _DEFAULT_RATING), result, is_a=False)
-            for b_id in team_b_ids
+            _build_result(card, ratings.get(card, _DEFAULT_RATING), result, is_a=False)
+            for card in team_b_cards
         ]
 
         return PredictionData(

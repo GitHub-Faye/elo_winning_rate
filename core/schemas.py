@@ -20,11 +20,11 @@ class EloRecordRequest(BaseModel):
     source_order: int = Field(0, description="赛事内场序号")
     score_a: int = Field(..., ge=0, description="A 方得分（非负整数）")
     score_b: int = Field(..., ge=0, description="B 方得分（非负整数）")
-    team_a: list[int] = Field(
-        ..., min_length=1, max_length=2, description="A 方选手 user_id 列表（1人=单打，2人=双打）"
+    team_a: list[str] = Field(
+        ..., min_length=1, max_length=2, description="A 方选手身份证号列表（1人=单打，2人=双打）"
     )
-    team_b: list[int] = Field(
-        ..., min_length=1, max_length=2, description="B 方选手 user_id 列表（1人=单打，2人=双打）"
+    team_b: list[str] = Field(
+        ..., min_length=1, max_length=2, description="B 方选手身份证号列表（1人=单打，2人=双打）"
     )
     event_weight: float = Field(1.0, gt=0, description="赛事权重（大于 0）")
     played_at: Optional[datetime] = Field(None, description="比赛时间")
@@ -51,7 +51,7 @@ class EloRecordRequest(BaseModel):
 
 class PlayerResult(BaseModel):
     """单名选手的 Elo 变化结果（含因子分解）"""
-    user_id: int
+    card_code: str
     delta: float
     rating_after: float
     games_after: int
@@ -67,8 +67,8 @@ class PlayerResult(BaseModel):
     clamped_delta: float
     upset_bonus: float
     upset_penalty: float
-    opponent_user_id: int
-    opponent_partner_id: Optional[int] = None
+    opponent_card_code: str
+    opponent_partner_card_code: Optional[str] = None
 
 
 class RecordData(BaseModel):
@@ -92,30 +92,30 @@ class ErrorResponse(BaseModel):
 
 class PredictionRequest(BaseModel):
     """胜率预测请求体"""
-    team_a: list[int] = Field(
+    team_a: list[str] = Field(
         ..., min_length=1, max_length=2,
-        description="A 方选手 user_id 列表（1人=单打，2人=双打）",
+        description="A 方选手身份证号列表（1人=单打，2人=双打）",
     )
-    team_b: list[int] = Field(
+    team_b: list[str] = Field(
         ..., min_length=1, max_length=2,
-        description="B 方选手 user_id 列表（1人=单打，2人=双打）",
+        description="B 方选手身份证号列表（1人=单打，2人=双打）",
     )
 
     @model_validator(mode="after")
     def _check_unique_ids(self) -> PredictionRequest:
         """同一方不能有重复选手，双方不能有重叠选手。"""
         if len(set(self.team_a)) != len(self.team_a):
-            raise ValueError("Team A 中有重复选手 ID")
+            raise ValueError("Team A 中有重复选手")
         if len(set(self.team_b)) != len(self.team_b):
-            raise ValueError("Team B 中有重复选手 ID")
+            raise ValueError("Team B 中有重复选手")
         if set(self.team_a) & set(self.team_b):
-            raise ValueError("双方不能有相同的选手 ID")
+            raise ValueError("双方不能有相同的选手")
         return self
 
 
 class PlayerPredictionResult(BaseModel):
     """单名选手的胜率预测结果"""
-    user_id: int
+    card_code: str
     rating: float
     games: int
     wins: int
@@ -154,3 +154,37 @@ class PredictionResponse(BaseModel):
     """胜率预测响应体"""
     success: bool = True
     data: PredictionData
+
+
+# ── 交手记录模型 ──
+
+
+class HeadToHeadRecord(BaseModel):
+    """单条交手记录"""
+    event_id: int
+    battle_id: int
+    team_size: int
+    """1=单打 2=双打"""
+    score_a: int
+    """选手 A 得分"""
+    score_b: int
+    """选手 B 得分"""
+    winner_card: str
+    """获胜方选手身份证号"""
+    played_at: Optional[datetime] = None
+
+
+class HeadToHeadData(BaseModel):
+    """交手记录汇总"""
+    player_a_card: str
+    player_b_card: str
+    total_matches: int
+    a_wins: int
+    b_wins: int
+    records: list[HeadToHeadRecord]
+
+
+class HeadToHeadResponse(BaseModel):
+    """交手记录响应"""
+    success: bool = True
+    data: HeadToHeadData

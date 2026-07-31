@@ -25,6 +25,7 @@ router = APIRouter(prefix="/api/v1/elo", tags=["elo"])
 - `team_a`/`team_b` 各 1 人 = 单打
 - `team_a`/`team_b` 各 2 人 = 双打
 
+选手以身份证号（card_code）定位，未注册用户同样适用。
 查询 DB 获取选手当前 Elo 分（新选手用默认值 1500），
 计算后写入 `elo_match_record` 并更新 `elo_player_rating`。
 """,

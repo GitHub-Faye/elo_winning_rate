@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.schemas import EloRecordRequest
 from services.elo_service import EloService
 
+# 测试用身份证号
+CARD_A = "110101199001011234"
+CARD_B = "110101199202024567"
+CARD_C = "110101199303036789"
+CARD_D = "110101199404041122"
+
 
 @pytest.fixture
 def mock_db() -> AsyncMock:
@@ -42,10 +48,10 @@ def _mock_singles_db(
     """创建单打场景的 mock DB。
 
     execute 调用顺序（共 4 次）：
-        1. _load_player_states([1]): .scalars().all() → [team_a_existing] or []
-        2. _load_player_states([2]): .scalars().all() → [team_b_existing] or []
-        3. _upsert_rating(user_a): .scalar_one_or_none() → team_a_existing (or None)
-        4. _upsert_rating(user_b): .scalar_one_or_none() → team_b_existing (or None)
+        1. _load_player_states([CARD_A]): .scalars().all() → [team_a_existing] or []
+        2. _load_player_states([CARD_B]): .scalars().all() → [team_b_existing] or []
+        3. _upsert_rating(card_a): .scalar_one_or_none() → team_a_existing (or None)
+        4. _upsert_rating(card_b): .scalar_one_or_none() → team_b_existing (or None)
     """
     db = AsyncMock(spec=AsyncSession)
     db.add = MagicMock()
@@ -59,16 +65,25 @@ def _mock_singles_db(
     e2 = MagicMock()
     e2.scalars().all.return_value = [team_b_existing] if team_b_existing else []
 
-    # 第3次 execute: _upsert_rating(user_a)
+    # 第3次 execute: _upsert_rating(card_a)
     e3 = MagicMock()
     e3.scalar_one_or_none.return_value = team_a_existing
 
-    # 第4次 execute: _upsert_rating(user_b)
+    # 第4次 execute: _upsert_rating(card_b)
     e4 = MagicMock()
     e4.scalar_one_or_none.return_value = team_b_existing
 
     db.execute = AsyncMock(side_effect=[e1, e2, e3, e4])
     return db
+
+
+def _existing_rating(card_code: str, rating: Decimal, games: int, wins: int, losses: int):
+    """构造一条已存在的 EloPlayerRating（SimpleNamespace）。"""
+    return SimpleNamespace(
+        card_code=card_code, sport_type="badminton",
+        rating=rating, games=games, wins=wins, losses=losses,
+        draws=0, highest_rating=Decimal("1800.00"), lowest_rating=Decimal("1500.00"),
+    )
 
 
 # ── 单打测试 ──
@@ -81,8 +96,8 @@ class TestSingles:
         self,
         score_a: int = 21,
         score_b: int = 15,
-        user_a: int = 1,
-        user_b: int = 2,
+        card_a: str = CARD_A,
+        card_b: str = CARD_B,
     ) -> EloRecordRequest:
         return EloRecordRequest(
             event_id=1,
@@ -90,8 +105,8 @@ class TestSingles:
             source_order=0,
             score_a=score_a,
             score_b=score_b,
-            team_a=[user_a],
-            team_b=[user_b],
+            team_a=[card_a],
+            team_b=[card_b],
             event_weight=1.0,
         )
 
@@ -107,8 +122,8 @@ class TestSingles:
         ra = resp.data.team_a[0]
         rb = resp.data.team_b[0]
 
-        assert ra.user_id == 1
-        assert rb.user_id == 2
+        assert ra.card_code == CARD_A
+        assert rb.card_code == CARD_B
         assert ra.delta > 0, f"胜者应加分，但 delta={ra.delta}"
         assert rb.delta < 0, f"败者应减分，但 delta={rb.delta}"
         assert abs(ra.delta + rb.delta) < 1, (
@@ -122,11 +137,7 @@ class TestSingles:
     @pytest.mark.asyncio
     async def test_singles_upset_bonus(self):
         """定级期新人爆冷胜高段位 → 触发越级加分 bonus。"""
-        existing_rating_b = SimpleNamespace(
-            user_id=2, sport_type="badminton",
-            rating=Decimal("1700.00"), games=50, wins=30, losses=20,
-            draws=0, highest_rating=Decimal("1800.00"), lowest_rating=Decimal("1500.00"),
-        )
+        existing_rating_b = _existing_rating(CARD_B, Decimal("1700.00"), 50, 30, 20)
         mock_db = _mock_singles_db(
             team_a_existing=None,
             team_b_existing=existing_rating_b,
@@ -145,11 +156,7 @@ class TestSingles:
     @pytest.mark.asyncio
     async def test_singles_upset_penalty(self):
         """高段位输给定级新人 → 被越级扣分 penalty。"""
-        existing_rating_a = SimpleNamespace(
-            user_id=1, sport_type="badminton",
-            rating=Decimal("1700.00"), games=50, wins=30, losses=20,
-            draws=0, highest_rating=Decimal("1800.00"), lowest_rating=Decimal("1500.00"),
-        )
+        existing_rating_a = _existing_rating(CARD_A, Decimal("1700.00"), 50, 30, 20)
         mock_db = _mock_singles_db(
             team_a_existing=existing_rating_a,
             team_b_existing=None,
@@ -167,11 +174,7 @@ class TestSingles:
     @pytest.mark.asyncio
     async def test_singles_new_player_high_k(self):
         """新选手 K=40，稳定期选手 K=20。"""
-        existing_rating_b = SimpleNamespace(
-            user_id=2, sport_type="badminton",
-            rating=Decimal("1500.00"), games=50, wins=25, losses=25,
-            draws=0, highest_rating=Decimal("1600.00"), lowest_rating=Decimal("1400.00"),
-        )
+        existing_rating_b = _existing_rating(CARD_B, Decimal("1500.00"), 50, 25, 25)
         mock_db = _mock_singles_db(
             team_a_existing=None,
             team_b_existing=existing_rating_b,
@@ -212,8 +215,8 @@ class TestDoubles:
             source_order=0,
             score_a=score_a,
             score_b=score_b,
-            team_a=[1, 2],
-            team_b=[3, 4],
+            team_a=[CARD_A, CARD_B],
+            team_b=[CARD_C, CARD_D],
             event_weight=1.0,
         )
 
@@ -237,6 +240,14 @@ class TestDoubles:
         resp = await service.record_match(self._make_request())
         assert mock_db.add.call_count >= 4, f"add 应至少 4 次，但={mock_db.add.call_count}"
 
+    @pytest.mark.asyncio
+    async def test_doubles_opponent_partner_card(self, service: EloService):
+        """双打时 opponent_partner_card_code 有值。"""
+        resp = await service.record_match(self._make_request())
+        a0 = resp.data.team_a[0]
+        assert a0.opponent_card_code == CARD_C
+        assert a0.opponent_partner_card_code == CARD_D
+
 
 # ── 边界场景 ──
 
@@ -249,7 +260,7 @@ class TestEdgeCases:
         req = EloRecordRequest(
             event_id=1, battle_id=300, source_order=0,
             score_a=21, score_b=21,
-            team_a=[1], team_b=[2], event_weight=1.0,
+            team_a=[CARD_A], team_b=[CARD_B], event_weight=1.0,
         )
         resp = await service.record_match(req)
         for result in resp.data.team_a + resp.data.team_b:
@@ -261,7 +272,7 @@ class TestEdgeCases:
         req = EloRecordRequest(
             event_id=1, battle_id=400, source_order=0,
             score_a=21, score_b=15,
-            team_a=[1], team_b=[2, 3], event_weight=1.0,
+            team_a=[CARD_A], team_b=[CARD_B, CARD_C], event_weight=1.0,
         )
         with pytest.raises(ValueError, match="人数不匹配"):
             await service.record_match(req)
@@ -269,11 +280,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_existing_player_update(self):
         """已有选手 → 更新战绩而非新建。"""
-        existing = SimpleNamespace(
-            user_id=1, sport_type="badminton",
-            rating=Decimal("1500.00"), games=10, wins=5, losses=5,
-            draws=0, highest_rating=Decimal("1600.00"), lowest_rating=Decimal("1400.00"),
-        )
+        existing = _existing_rating(CARD_A, Decimal("1500.00"), 10, 5, 5)
         mock_db = _mock_singles_db(
             team_a_existing=existing,
             team_b_existing=None,
@@ -283,7 +290,7 @@ class TestEdgeCases:
         req = EloRecordRequest(
             event_id=1, battle_id=500, source_order=0,
             score_a=21, score_b=15,
-            team_a=[1], team_b=[2], event_weight=1.0,
+            team_a=[CARD_A], team_b=[CARD_B], event_weight=1.0,
         )
         await svc.record_match(req)
 
@@ -297,7 +304,7 @@ class TestEdgeCases:
         req = EloRecordRequest(
             event_id=1, battle_id=600, source_order=0,
             score_a=21, score_b=15,
-            team_a=[1], team_b=[2], event_weight=1.0,
+            team_a=[CARD_A], team_b=[CARD_B], event_weight=1.0,
         )
         resp = await service.record_match(req)
         assert resp.success is True

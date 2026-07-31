@@ -5,9 +5,10 @@
 单打：一场比赛产生 2 条记录（A 方 1 人 + B 方 1 人）
 双打：一场比赛产生 4 条记录（A 方 2 人 + B 方 2 人）
 
-逻辑外键说明：
-  - user_id → motion_user.user_id（数据链路已验证注入，数据库层不设 FK）
-  - event_id → motion_event.event_id（同上）
+选手定位键说明：
+  - card_code（身份证号）是唯一可靠定位（未注册用户无 user_id，
+    motion_event_apply_user_setting.member_id = 0，但 card_code 必有）
+  - event_id → motion_event.event_id（数据链路已验证注入，数据库层不设 FK）
   - battle_id → motion_event_layout_stage_battle.battle_id（同上）
 """
 from __future__ import annotations
@@ -26,13 +27,12 @@ class EloPlayerRating(SQLModel, table=True):
 
     __tablename__ = "elo_player_rating"
 
-    user_id: int = Field(
-        default=None,
+    card_code: str = Field(
         sa_column=Column(
-            "user_id",
-            BIGINT,
+            "card_code",
+            VARCHAR(32),
             primary_key=True,
-            comment="用户ID，逻辑外键 → motion_user.user_id（数据链路保证，不设数据库 FK）",
+            comment="选手身份证号，逻辑外键 → motion_event_apply_user_setting.card_code（数据链路保证，不设数据库 FK）",
         ),
     )
     sport_type: str = Field(
@@ -114,9 +114,9 @@ class EloMatchRecord(SQLModel, table=True):
         sa_column_kwargs={"comment": "赛事内场序号（event_index），用于回放排序"},
     )
 
-    # ── 选手维度（一人一条） ──
-    user_id: int = Field(
-        sa_column=Column("user_id", BIGINT, comment="选手用户ID"),
+    # ── 选手维度（一人一条，身份证号定位） ──
+    card_code: str = Field(
+        sa_column=Column("card_code", VARCHAR(32), comment="选手身份证号"),
     )
     team_side: str = Field(
         sa_type=VARCHAR(1),
@@ -182,12 +182,12 @@ class EloMatchRecord(SQLModel, table=True):
     )
 
     # ── 对方信息 ──
-    opponent_user_id: int = Field(
-        sa_column=Column("opponent_user_id", BIGINT, comment="对手用户ID（双打时为第一个对手）"),
+    opponent_card_code: str = Field(
+        sa_column=Column("opponent_card_code", VARCHAR(32), comment="对手身份证号（双打时为第一个对手）"),
     )
-    opponent_partner_id: Optional[int] = Field(
+    opponent_partner_card_code: Optional[str] = Field(
         default=None,
-        sa_column=Column("opponent_partner_id", BIGINT, comment="双打时第二个对手，单打为 NULL"),
+        sa_column=Column("opponent_partner_card_code", VARCHAR(32), comment="双打时第二个对手，单打为 NULL"),
     )
 
     # ── 比赛信息 ──
