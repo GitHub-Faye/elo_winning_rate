@@ -244,3 +244,27 @@ class RatingQueryResponse(BaseModel):
     """积分查询响应体"""
     success: bool = True
     data: RatingQueryData
+
+
+# ── 赛事报名人积分模型 ──
+
+
+class EventPlayerRating(PlayerRatingResult):
+    """赛事报名人积分查询结果（在积分基础上附加选手姓名）"""
+    name: Optional[str] = None
+    """报名时填写的姓名"""
+
+
+class EventRatingData(BaseModel):
+    """赛事报名人积分查询数据"""
+    event_id: int
+    """赛事 ID"""
+    sport_type: str
+    """运动品类（如 badminton）"""
+    results: list[EventPlayerRating]
+
+
+class EventRatingResponse(BaseModel):
+    """赛事报名人积分查询响应体"""
+    success: bool = True
+    data: EventRatingData
