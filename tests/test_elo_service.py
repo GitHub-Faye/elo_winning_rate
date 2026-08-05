@@ -173,8 +173,8 @@ class TestSingles:
 
     @pytest.mark.asyncio
     async def test_singles_new_player_high_k(self):
-        """新选手 K=40，稳定期选手 K=20。"""
-        existing_rating_b = _existing_rating(CARD_B, Decimal("1500.00"), 50, 25, 25)
+        """新选手 K=80，稳定期选手 K=15。"""
+        existing_rating_b = _existing_rating(CARD_B, Decimal("1500.00"), 80, 40, 40)
         mock_db = _mock_singles_db(
             team_a_existing=None,
             team_b_existing=existing_rating_b,
@@ -184,8 +184,8 @@ class TestSingles:
         req = self._make_request(score_a=21, score_b=15)
         resp = await svc.record_match(req)
 
-        assert resp.data.team_a[0].k_factor == 40.0
-        assert resp.data.team_b[0].k_factor == 20.0
+        assert resp.data.team_a[0].k_factor == 80.0  # new_player_k (games=0)
+        assert resp.data.team_b[0].k_factor == 15.0  # stable_k (games=50)
 
     @pytest.mark.asyncio
     async def test_singles_db_write_called(self, service: EloService, mock_db: AsyncMock):

@@ -24,19 +24,14 @@ CARD_D = "110101199404041122"
 
 @pytest.fixture
 def mock_db() -> AsyncMock:
-    """创建全空 DB 的 mock（无 rating 记录、无比赛记录）。"""
+    """创建全空 DB 的 mock（无 rating 记录）。"""
     db = AsyncMock(spec=AsyncSession)
 
     # _load_player_ratings: scalars().all() → []
     ex1 = MagicMock()
     ex1.scalars().all.return_value = []
-    # _build_relation_graph: 两个查询，都返回空
-    ex2 = MagicMock()
-    ex2.scalars().all.return_value = []
-    ex3 = MagicMock()
-    ex3.scalars().all.return_value = []
 
-    db.execute = AsyncMock(side_effect=[ex1, ex2, ex3])
+    db.execute = AsyncMock(return_value=ex1)
     return db
 
 
@@ -86,8 +81,6 @@ class TestSingles:
         assert p.losses == 0
         assert 0 <= p.probability <= 1
         assert 0 <= p.elo_base_probability <= 1
-        assert isinstance(p.direct_adjustment, float)
-        assert isinstance(p.indirect_adjustment, float)
 
 
 class TestDoubles:
@@ -159,77 +152,6 @@ class TestEdgeCases:
             PredictionRequest(team_a=[CARD_A], team_b=[CARD_A])
 
 
-class TestRelationGraph:
-    """用预置比赛记录验证关系图构建"""
-
-    def _make_record(
-        self,
-        card_code: str = CARD_A,
-        opponent_card_code: str = CARD_B,
-        is_winner: int = 1,
-        rating_before: float = 1500.0,
-        delta: float = 10.0,
-    ):
-        """构造一条简单的 EloMatchRecord。"""
-        from types import SimpleNamespace
-        return SimpleNamespace(
-            card_code=card_code,
-            opponent_card_code=opponent_card_code,
-            is_winner=is_winner,
-            event_id=1,
-            battle_id=1,
-            source_order=0,
-            team_side="A",
-            team_size=1,
-            rating_before=rating_before,
-            delta=delta,
-            rating_after=rating_before + delta,
-            score_self=21,
-            score_opponent=15,
-        )
-
-    def _make_db_with_records(
-        self,
-        records1: list,
-        records2: list | None = None,
-    ) -> AsyncMock:
-        """创建含比赛记录的 mock DB。
-
-        execute 调用顺序:
-          1. _load_player_ratings: scalars().all() → []
-          2. build_relation_graph 第1层: scalars().all() → records1
-          3. build_relation_graph 第2层: scalars().all() → records2 or []
-        """
-        db = AsyncMock(spec=AsyncSession)
-
-        e1 = MagicMock()
-        e1.scalars().all.return_value = []
-
-        e2 = MagicMock()
-        e2.scalars().all.return_value = records1
-
-        e3 = MagicMock()
-        e3.scalars().all.return_value = records2 or []
-
-        db.execute = AsyncMock(side_effect=[e1, e2, e3])
-        return db
-
-    @pytest.mark.asyncio
-    async def test_singles_with_direct_record(self):
-        """有直接交手记录 → direct_record_total > 0。"""
-        rec = self._make_record(card_code=CARD_A, opponent_card_code=CARD_B, is_winner=1)
-        db = self._make_db_with_records([rec])
-        svc = PredictionService(db)
-
-        req = PredictionRequest(team_a=[CARD_A], team_b=[CARD_B])
-        resp = await svc.predict(req)
-
-        p1 = resp.data.team_a.players[0]
-        assert p1.direct_record_total >= 1, f"应有交手记录，但 total={p1.direct_record_total}"
-        if p1.direct_record_total > 0:
-            assert p1.direct_record_wins >= 1 or p1.direct_record_losses >= 1
-
-
 class TestBuildResult:
     """_build_result 和 _view_for_side 纯函数的独立测试"""
 
@@ -241,18 +163,10 @@ class TestBuildResult:
             probability_a=0.75,
             probability_b=0.25,
             elo_base_probability=0.6,
-            direct_adjustment=0.08,
-            indirect_adjustment=0.07,
-            direct_record={"wins": 3, "losses": 1, "total": 4},
         )
         v = _view_for_side(result, is_a=True)
         assert v.probability == 0.75
         assert v.elo_base_probability == 0.6
-        assert v.direct_adjustment == 0.08
-        assert v.indirect_adjustment == 0.07
-        assert v.direct_record_wins == 3
-        assert v.direct_record_losses == 1
-        assert v.direct_record_total == 4
 
     def test_view_for_side_is_b(self):
         """is_a=False 时 _view_for_side 翻转字段。"""
@@ -262,18 +176,10 @@ class TestBuildResult:
             probability_a=0.75,
             probability_b=0.25,
             elo_base_probability=0.6,
-            direct_adjustment=0.08,
-            indirect_adjustment=0.07,
-            direct_record={"wins": 3, "losses": 1, "total": 4},
         )
         v = _view_for_side(result, is_a=False)
         assert v.probability == 0.25
         assert abs(v.elo_base_probability - 0.4) < 0.001
-        assert v.direct_adjustment == -0.08
-        assert v.indirect_adjustment == -0.07
-        assert v.direct_record_wins == 1  # B's wins = A's losses
-        assert v.direct_record_losses == 3  # B's losses = A's wins
-        assert v.direct_record_total == 4
 
     def test_build_result_proxies_view(self):
         """_build_result 使用 _view_for_side 的结果构建 PlayerPredictionResult。"""
@@ -283,9 +189,6 @@ class TestBuildResult:
             probability_a=0.75,
             probability_b=0.25,
             elo_base_probability=0.6,
-            direct_adjustment=0.08,
-            indirect_adjustment=0.07,
-            direct_record={"wins": 3, "losses": 1, "total": 4},
         )
         snapshot = PlayerRatingSnapshot(rating=1600.0, games=20, wins=12, losses=8)
         pr = _build_result(CARD_A, snapshot, result, is_a=True)
@@ -294,11 +197,6 @@ class TestBuildResult:
         assert pr.rating == 1600.0
         assert pr.probability == 0.75
         assert pr.elo_base_probability == 0.6
-        assert pr.direct_record_wins == 3
-        assert pr.direct_record_losses == 1
-        assert pr.direct_record_total == 4
 
         pr_b = _build_result(CARD_B, snapshot, result, is_a=False)
         assert pr_b.probability == 0.25
-        assert pr_b.direct_record_wins == 1  # flipped
-        assert pr_b.direct_record_losses == 3

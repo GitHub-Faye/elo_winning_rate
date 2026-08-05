@@ -124,16 +124,6 @@ class PlayerPredictionResult(BaseModel):
     """最终预测胜率（clamp 后）"""
     elo_base_probability: float
     """Elo 基础胜率"""
-    direct_adjustment: float
-    """直接交手修正值"""
-    indirect_adjustment: float
-    """间接关系修正值"""
-    direct_record_wins: int
-    """对该方选手的直接交手胜场"""
-    direct_record_losses: int
-    """对该方选手的直接交手负场"""
-    direct_record_total: int
-    """对该方选手的总交手场次"""
 
 
 class PlayerPredictionList(BaseModel):

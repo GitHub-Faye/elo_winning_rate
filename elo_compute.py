@@ -34,31 +34,31 @@ class EloConfig:
 
     # ── K 值（赛龄阶段） ──
     new_player_games: int = 2
-    new_player_k: float = 40.0
-    provisional_games: int = 30
-    provisional_k: float = 28.0
-    stable_k: float = 20.0
+    new_player_k: float = 80.0
+    provisional_games: int = 60
+    provisional_k: float = 30.0
+    stable_k: float = 15.0
 
     # ── 预期胜率 ──
-    elo_scale: float = 400.0
+    elo_scale: float = 200.0
 
     # ── 分差倍率 M_margin ──
-    margin_weight: float = 0.5
-    min_margin_cap: int = 21
+    margin_weight: float = 1.0
+    min_margin_cap: int = 15
 
     # ── 赛事权重 M_weight ──
     match_weight: float = 1.0
 
     # ── 封顶 cap ──
-    delta_cap: float = 40.0
+    delta_cap: float = 80.0
 
     # ── 越级加分 bonus ──
-    upset_min_rating_gap: float = 150.0
-    upset_bonus_per_100: float = 6.0
-    upset_bonus_cap: float = 24.0
+    upset_min_rating_gap: float = 50.0
+    upset_bonus_per_100: float = 15.0
+    upset_bonus_cap: float = 25.0
 
     # ── 被越级扣分 penalty ──
-    upset_loser_penalty_ratio: float = 0.25
+    upset_loser_penalty_ratio: float = 0.5
 
 
 @dataclass(frozen=True)

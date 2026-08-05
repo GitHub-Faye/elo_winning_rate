@@ -46,3 +46,4 @@ htmlcov/
 # Logs
 *.log
 logs/
+training_data.json
