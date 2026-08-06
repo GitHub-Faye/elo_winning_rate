@@ -258,3 +258,64 @@ class EventRatingResponse(BaseModel):
     """赛事报名人积分查询响应体"""
     success: bool = True
     data: EventRatingData
+
+
+# ── 六维雷达图模型 ──
+
+
+class RadarMatchDetail(BaseModel):
+    """单场六维雷达图明细"""
+    score_team_id: int
+    """记分 ID"""
+    battle_id: int
+    """对阵 ID"""
+    opponent: Optional[str] = None
+    """对手姓名（队伍名）"""
+    score: Optional[str] = None
+    """比分（本方:对手）"""
+    create_time: Optional[str] = None
+    """比赛日期"""
+    offense: float
+    defense: float
+    serve: float
+    receive: float
+    anti_pressure: float
+    field: float
+    consecutive_score: float
+    consecutive_lose: float
+
+
+class RadarProfile(BaseModel):
+    """单名选手的六维雷达图"""
+    name: Optional[str] = None
+    """选手姓名"""
+    card_code: str
+    """选手身份证号"""
+    matches: int
+    """参与计算的单打场次"""
+    total_singles: int
+    """历史全部单打场次"""
+    offense: Optional[float] = None
+    """进攻得分（发球权得分率归一化）"""
+    defense: Optional[float] = None
+    """防守得分（接发权得分率归一化）"""
+    serve: Optional[float] = None
+    """发球"""
+    receive: Optional[float] = None
+    """接发"""
+    anti_pressure: Optional[float] = None
+    """抗压"""
+    field: Optional[float] = None
+    """场区（换边适应性）"""
+    consecutive_score: Optional[float] = None
+    """平均连续得分"""
+    consecutive_lose: Optional[float] = None
+    """平均连续失分"""
+    match_details: list[RadarMatchDetail] = Field(default_factory=list)
+    """各单场明细"""
+
+
+class RadarResponse(BaseModel):
+    """六维雷达图响应体"""
+    success: bool = True
+    data: RadarProfile
