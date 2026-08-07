@@ -5,8 +5,10 @@ from routers.head_to_head import router as head_to_head_router
 from routers.rating import router as rating_router
 from routers.event_rating import router as event_rating_router
 from routers.radar import router as radar_router
+from routers.player_records import router as player_records_router
 
 app = FastAPI(title="ELO Winning Rate")
+app.include_router(player_records_router, prefix="")
 app.include_router(elo_router, prefix="")
 app.include_router(prediction_router, prefix="")
 app.include_router(head_to_head_router, prefix="")

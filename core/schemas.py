@@ -319,3 +319,55 @@ class RadarResponse(BaseModel):
     """六维雷达图响应体"""
     success: bool = Field(..., description="请求是否成功")
     data: RadarProfile = Field(..., description="选手六维雷达图（含各场明细）")
+
+
+# ── 个人比赛记录模型 ──
+
+
+class PlayerRecord(BaseModel):
+    """单条个人比赛记录（以本人视角呈现）"""
+    event_id: int = Field(..., description="赛事 ID")
+    battle_id: int = Field(..., description="对阵 ID")
+    source_order: int = Field(0, description="赛事内场序号")
+    team_size: int = Field(..., description="比赛形式：1=单打 2=双打")
+    is_winner: bool = Field(..., description="本场是否获胜")
+    score_self: int = Field(..., description="本方得分")
+    score_opponent: int = Field(..., description="对方得分")
+    # Elo 变化
+    rating_before: float = Field(..., description="赛前 Elo")
+    rating_after: float = Field(..., description="赛后 Elo")
+    delta: float = Field(..., description="Elo 变化量（正=加分，负=减分）")
+    # 对手信息
+    opponent_card_code: Optional[str] = Field(
+        None, description="对手身份证号（双打时为第一个对手）",
+    )
+    opponent_partner_card_code: Optional[str] = Field(
+        None, description="对手搭档身份证号（双打时有值，单打为 null）",
+    )
+    played_at: Optional[datetime] = Field(None, description="比赛时间")
+
+
+class PlayerRecordSummary(BaseModel):
+    """个人比赛记录汇总统计"""
+    total_matches: int = Field(..., description="总场次（含单打和双打）")
+    total_singles: int = Field(..., description="单打场次")
+    total_doubles: int = Field(..., description="双打场次")
+    wins: int = Field(..., description="胜场")
+    losses: int = Field(..., description="负场")
+    win_rate: Optional[float] = Field(None, description="胜率（0-1，无比赛为 null）")
+    avg_score_self: Optional[float] = Field(None, description="场均本方得分")
+    avg_score_opponent: Optional[float] = Field(None, description="场均对方得分")
+    avg_delta: Optional[float] = Field(None, description="场均 Elo 变化")
+
+
+class PlayerRecordsData(BaseModel):
+    """个人比赛记录响应数据"""
+    card_code: str = Field(..., description="选手身份证号")
+    summary: PlayerRecordSummary = Field(..., description="汇总统计")
+    records: list[PlayerRecord] = Field(..., description="逐场比赛明细（按时间倒序）")
+
+
+class PlayerRecordsResponse(BaseModel):
+    """个人比赛记录响应体"""
+    success: bool = Field(..., description="请求是否成功")
+    data: PlayerRecordsData = Field(..., description="选手比赛记录与汇总统计")
