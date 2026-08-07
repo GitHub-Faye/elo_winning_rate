@@ -371,3 +371,59 @@ class PlayerRecordsResponse(BaseModel):
     """个人比赛记录响应体"""
     success: bool = Field(..., description="请求是否成功")
     data: PlayerRecordsData = Field(..., description="选手比赛记录与汇总统计")
+
+
+# ── 删除比赛记录模型 ──
+
+
+class RollbackResult(BaseModel):
+    """单名选手的回滚结果"""
+    card_code: str = Field(..., description="选手身份证号")
+    is_latest_match: bool = Field(
+        ..., description="该场是否为该选手的最新一场（仅最新一场才回滚积分）",
+    )
+    rating_after: Optional[float] = Field(
+        None, description="回滚后积分（非最新一场为 null，积分未变动）",
+    )
+    games_after: Optional[int] = Field(None, description="回滚后总场次")
+    wins_after: Optional[int] = Field(None, description="回滚后胜场")
+    losses_after: Optional[int] = Field(None, description="回滚后负场")
+    deleted: bool = Field(..., description="本名选手的比赛记录是否已删除（比赛存在前提）")
+
+
+class DeleteMatchResult(BaseModel):
+    """单名选手的删除/回滚结果"""
+    card_code: str = Field(..., description="选手身份证号")
+    removed: bool = Field(..., description="本名选手的该场比赛记录是否被删除")
+    rollback: Optional[RollbackResult] = Field(
+        None, description="积分回滚结果（若该场为该选手最新一场则回滚）",
+    )
+
+
+class DeleteMatchData(BaseModel):
+    """删除比赛记录响应数据"""
+    event_id: int = Field(..., description="赛事 ID")
+    battle_id: int = Field(..., description="对阵 ID")
+    match_type: str = Field(..., description="比赛类型: singles=单打 / doubles=双打")
+    deleted: bool = Field(..., description="该场比赛记录是否已删除（比赛存在则为 true）")
+    total_records_deleted: int = Field(..., description="删除的 elo_match_record 条数")
+    players_affected: list[DeleteMatchResult] = Field(
+        ..., description="各受影响选手的删除与积分回滚明细",
+    )
+
+
+class DeleteMatchResponse(BaseModel):
+    """删除比赛记录响应体"""
+    success: bool = Field(..., description="请求是否成功")
+    data: DeleteMatchData = Field(..., description="删除与积分回滚明细")
+    notice: Optional[str] = Field(
+        None, description="提示信息（如部分选手非最新一场，积分未回滚）",
+    )
+
+
+class MatchDeleteErrorResponse(BaseModel):
+    """比赛不存在 / 无匹配记录的错误响应"""
+    detail: str = Field(..., description="错误描述")
+    event_id: Optional[int] = Field(None, description="赛事 ID")
+    battle_id: Optional[int] = Field(None, description="对阵 ID")
+    code: Optional[str] = Field(None, description="错误码，如 match_not_found")
