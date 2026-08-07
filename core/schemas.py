@@ -15,19 +15,42 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 class EloRecordRequest(BaseModel):
     """Elo 记录请求体"""
-    event_id: int = Field(..., description="赛事ID")
-    battle_id: int = Field(..., description="对阵ID")
-    source_order: int = Field(0, description="赛事内场序号")
-    score_a: int = Field(..., ge=0, description="A 方得分（非负整数）")
-    score_b: int = Field(..., ge=0, description="B 方得分（非负整数）")
+    event_id: int = Field(
+        ...,
+        description="赛事 ID。用于标识这场比赛隶属于哪场赛事，并写入比赛记录。",
+    )
+    battle_id: int = Field(
+        ...,
+        description="对阵 ID。标识该赛事内的一场具体对阵（两队之间的一场比赛），与 event_id 共同构成比赛记录的唯一性。",
+    )
+    source_order: int = Field(
+        0,
+        description="赛事内场序号。该对阵在赛事场次中的排序位置，仅用于展示/追溯，不参与 Elo 计算。",
+    )
+    score_a: int = Field(
+        ..., ge=0,
+        description="A 方（第一队）本场比赛得分。用于分差倍率 M_margin 计算与胜负判定（A>B 则 A 胜）。",
+    )
+    score_b: int = Field(
+        ..., ge=0,
+        description="B 方（第二队）本场比赛得分。用于分差倍率 M_margin 计算与胜负判定（B>A 则 B 胜）。",
+    )
     team_a: list[str] = Field(
-        ..., min_length=1, max_length=2, description="A 方选手身份证号列表（1人=单打，2人=双打）"
+        ..., min_length=1, max_length=2,
+        description="A 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。选手以身份证号定位，未注册用户同样适用。",
     )
     team_b: list[str] = Field(
-        ..., min_length=1, max_length=2, description="B 方选手身份证号列表（1人=单打，2人=双打）"
+        ..., min_length=1, max_length=2,
+        description="B 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。双方人数必须一致。",
     )
-    event_weight: float = Field(1.0, gt=0, description="赛事权重（大于 0）")
-    played_at: Optional[datetime] = Field(None, description="比赛时间")
+    event_weight: float = Field(
+        1.0, gt=0,
+        description="赛事权重（须大于 0）。作为赛事权重倍率 M_weight 的一部分参与 Elo 计算，如热身赛/正式赛可设不同权重。",
+    )
+    played_at: Optional[datetime] = Field(
+        None,
+        description="比赛时间。缺省时使用服务器当前时间。",
+    )
 
     @field_validator("score_a", "score_b")
     @classmethod
@@ -51,36 +74,38 @@ class EloRecordRequest(BaseModel):
 
 class PlayerResult(BaseModel):
     """单名选手的 Elo 变化结果（含因子分解）"""
-    card_code: str
-    delta: float
-    rating_after: float
-    games_after: int
-    wins_after: int
-    losses_after: int
+    card_code: str = Field(..., description="选手身份证号")
+    delta: float = Field(..., description="本次 Elo 最终变化量（正=加分，负=减分）")
+    rating_after: float = Field(..., description="更新后的 Elo 分")
+    games_after: int = Field(..., description="更新后的总场次")
+    wins_after: int = Field(..., description="更新后的胜场")
+    losses_after: int = Field(..., description="更新后的负场")
     # 因子分解
-    rating_before: float
-    expected: float
-    k_factor: float
-    weight_multiplier: float
-    margin_multiplier: float
-    base_delta: float
-    clamped_delta: float
-    upset_bonus: float
-    upset_penalty: float
-    opponent_card_code: str
-    opponent_partner_card_code: Optional[str] = None
+    rating_before: float = Field(..., description="本次比赛前的 Elo 分")
+    expected: float = Field(..., description="预期胜率 E（基于双方 Elo 差距计算）")
+    k_factor: float = Field(..., description="K 值（按赛龄阶段：新秀/观察期/稳定期不同）")
+    weight_multiplier: float = Field(..., description="赛事权重倍率 M_weight（= match_weight × event_weight）")
+    margin_multiplier: float = Field(..., description="分差倍率 M_margin（比分差距越大越高）")
+    base_delta: float = Field(..., description="封顶前的普通变化（= K×M_weight×M_margin×(S-E)）")
+    clamped_delta: float = Field(..., description="封顶后的普通变化（限制在 ±delta_cap 内）")
+    upset_bonus: float = Field(..., description="越级加分：新秀选手爆冷击败高分对手时的额外加分")
+    upset_penalty: float = Field(..., description="被越级扣分：输给爆冷获胜的新秀时被扣的分数")
+    opponent_card_code: str = Field(..., description="对手选手身份证号")
+    opponent_partner_card_code: Optional[str] = Field(
+        None, description="对手搭档身份证号（双打时有值，单打为 null）",
+    )
 
 
 class RecordData(BaseModel):
     """按方分组的 Elo 变化数据"""
-    team_a: list[PlayerResult]
-    team_b: list[PlayerResult]
+    team_a: list[PlayerResult] = Field(..., description="A 方每位选手的 Elo 变化结果")
+    team_b: list[PlayerResult] = Field(..., description="B 方每位选手的 Elo 变化结果")
 
 
 class EloRecordResponse(BaseModel):
     """Elo 记录响应体"""
-    success: bool = True
-    data: RecordData
+    success: bool = Field(..., description="请求是否成功")
+    data: RecordData = Field(..., description="比赛记录后双方选手的 Elo 变化明细")
 
 
 class ErrorResponse(BaseModel):
@@ -94,11 +119,11 @@ class PredictionRequest(BaseModel):
     """胜率预测请求体"""
     team_a: list[str] = Field(
         ..., min_length=1, max_length=2,
-        description="A 方选手身份证号列表（1人=单打，2人=双打）",
+        description="A 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。",
     )
     team_b: list[str] = Field(
         ..., min_length=1, max_length=2,
-        description="B 方选手身份证号列表（1人=单打，2人=双打）",
+        description="B 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。双方人数必须一致。",
     )
 
     @model_validator(mode="after")
@@ -115,35 +140,39 @@ class PredictionRequest(BaseModel):
 
 class PlayerPredictionResult(BaseModel):
     """单名选手的胜率预测结果"""
-    card_code: str
-    rating: float
-    games: int
-    wins: int
-    losses: int
-    probability: float
-    """最终预测胜率（clamp 后）"""
-    elo_base_probability: float
-    """Elo 基础胜率"""
+    card_code: str = Field(..., description="选手身份证号")
+    rating: float = Field(..., description="选手当前 Elo 分")
+    games: int = Field(..., description="选手总场次")
+    wins: int = Field(..., description="选手胜场")
+    losses: int = Field(..., description="选手负场")
+    probability: float = Field(
+        ..., description="最终预测胜率（0-1，含关系图调优后的 clamp，本选手所在方的胜率）",
+    )
+    elo_base_probability: float = Field(
+        ..., description="Elo 基础胜率（仅基于双方 Elo 分差的原始预期胜率，未加调优）",
+    )
 
 
 class PlayerPredictionList(BaseModel):
     """一方队伍的预测结果列表"""
-    players: list[PlayerPredictionResult]
+    players: list[PlayerPredictionResult] = Field(
+        ..., description="本方每位选手的预测结果（单打 1 人，双打 2 人）",
+    )
 
 
 class PredictionData(BaseModel):
     """完整的预测响应数据"""
     match_type: str = Field(
-        ..., description="比赛类型: singles / doubles",
+        ..., description="比赛类型: singles=单打 / doubles=双打",
     )
-    team_a: PlayerPredictionList
-    team_b: PlayerPredictionList
+    team_a: PlayerPredictionList = Field(..., description="A 方预测结果")
+    team_b: PlayerPredictionList = Field(..., description="B 方预测结果")
 
 
 class PredictionResponse(BaseModel):
     """胜率预测响应体"""
-    success: bool = True
-    data: PredictionData
+    success: bool = Field(..., description="请求是否成功")
+    data: PredictionData = Field(..., description="双方选手的胜率预测结果")
 
 
 # ── 交手记录模型 ──
@@ -151,33 +180,29 @@ class PredictionResponse(BaseModel):
 
 class HeadToHeadRecord(BaseModel):
     """单条交手记录"""
-    event_id: int
-    battle_id: int
-    team_size: int
-    """1=单打 2=双打"""
-    score_a: int
-    """选手 A 得分"""
-    score_b: int
-    """选手 B 得分"""
-    winner_card: str
-    """获胜方选手身份证号"""
-    played_at: Optional[datetime] = None
+    event_id: int = Field(..., description="赛事 ID")
+    battle_id: int = Field(..., description="对阵 ID")
+    team_size: int = Field(..., description="比赛形式：1=单打 2=双打")
+    score_a: int = Field(..., description="选手 A 视角得分")
+    score_b: int = Field(..., description="选手 B 视角得分")
+    winner_card: str = Field(..., description="获胜方选手身份证号")
+    played_at: Optional[datetime] = Field(None, description="比赛时间")
 
 
 class HeadToHeadData(BaseModel):
     """交手记录汇总"""
-    player_a_card: str
-    player_b_card: str
-    total_matches: int
-    a_wins: int
-    b_wins: int
-    records: list[HeadToHeadRecord]
+    player_a_card: str = Field(..., description="选手 A 身份证号")
+    player_b_card: str = Field(..., description="选手 B 身份证号")
+    total_matches: int = Field(..., description="两人交手的总场次（含单打和双打）")
+    a_wins: int = Field(..., description="选手 A 获胜场次")
+    b_wins: int = Field(..., description="选手 B 获胜场次")
+    records: list[HeadToHeadRecord] = Field(..., description="逐场交手明细")
 
 
 class HeadToHeadResponse(BaseModel):
     """交手记录响应"""
-    success: bool = True
-    data: HeadToHeadData
+    success: bool = Field(..., description="请求是否成功")
+    data: HeadToHeadData = Field(..., description="两人交手记录汇总与明细")
 
 
 # ── 积分查询模型 ──
@@ -187,7 +212,7 @@ class RatingQueryRequest(BaseModel):
     """按身份证号批量查询积分请求体"""
     card_codes: list[str] = Field(
         ..., min_length=1, max_length=50,
-        description="选手身份证号列表（去重，最多 50 个）",
+        description="选手身份证号（card_code）列表。服务端自动去重，最多 50 个。",
     )
 
     @model_validator(mode="after")
@@ -205,35 +230,29 @@ class RatingQueryRequest(BaseModel):
 
 class PlayerRatingResult(BaseModel):
     """单名选手的积分查询结果"""
-    card_code: str
-    """选手身份证号"""
-    rating: Optional[float] = None
-    """当前 Elo 分（未建档选手为 null）"""
-    games: Optional[int] = None
-    """总比赛场次"""
-    wins: Optional[int] = None
-    """胜场"""
-    losses: Optional[int] = None
-    """负场"""
-    rank: Optional[str] = None
-    """段位（1段-9段；场次<2 为「定级中」；未建档为 null）"""
-    is_provisional: bool = False
-    """是否处于定级期（场次 < 2）"""
-    is_new: bool = False
-    """是否未建档（无 elo_player_rating 记录）"""
+    card_code: str = Field(..., description="选手身份证号")
+    rating: Optional[float] = Field(None, description="当前 Elo 分（未建档选手为 null）")
+    games: Optional[int] = Field(None, description="总比赛场次")
+    wins: Optional[int] = Field(None, description="胜场")
+    losses: Optional[int] = Field(None, description="负场")
+    rank: Optional[str] = Field(
+        None,
+        description="段位（1段-9段；场次<2 为「定级中」；未建档为 null）",
+    )
+    is_provisional: bool = Field(False, description="是否处于定级期（总场次 < 2）")
+    is_new: bool = Field(False, description="是否未建档（无 elo_player_rating 记录）")
 
 
 class RatingQueryData(BaseModel):
     """批量积分查询数据"""
-    sport_type: str
-    """运动品类（如 badminton）"""
-    results: list[PlayerRatingResult]
+    sport_type: str = Field(..., description="运动品类（如 badminton）")
+    results: list[PlayerRatingResult] = Field(..., description="各选手的积分查询结果")
 
 
 class RatingQueryResponse(BaseModel):
     """积分查询响应体"""
-    success: bool = True
-    data: RatingQueryData
+    success: bool = Field(..., description="请求是否成功")
+    data: RatingQueryData = Field(..., description="各选手的积分与段位查询结果")
 
 
 # ── 赛事报名人积分模型 ──
@@ -241,23 +260,20 @@ class RatingQueryResponse(BaseModel):
 
 class EventPlayerRating(PlayerRatingResult):
     """赛事报名人积分查询结果（在积分基础上附加选手姓名）"""
-    name: Optional[str] = None
-    """报名时填写的姓名"""
+    name: Optional[str] = Field(None, description="报名时填写的姓名")
 
 
 class EventRatingData(BaseModel):
     """赛事报名人积分查询数据"""
-    event_id: int
-    """赛事 ID"""
-    sport_type: str
-    """运动品类（如 badminton）"""
-    results: list[EventPlayerRating]
+    event_id: int = Field(..., description="赛事 ID")
+    sport_type: str = Field(..., description="运动品类（如 badminton）")
+    results: list[EventPlayerRating] = Field(..., description="各报名人（含姓名）的积分与段位")
 
 
 class EventRatingResponse(BaseModel):
     """赛事报名人积分查询响应体"""
-    success: bool = True
-    data: EventRatingData
+    success: bool = Field(..., description="请求是否成功")
+    data: EventRatingData = Field(..., description="赛事全部有效报名人的积分与段位")
 
 
 # ── 六维雷达图模型 ──
@@ -265,57 +281,41 @@ class EventRatingResponse(BaseModel):
 
 class RadarMatchDetail(BaseModel):
     """单场六维雷达图明细"""
-    score_team_id: int
-    """记分 ID"""
-    battle_id: int
-    """对阵 ID"""
-    opponent: Optional[str] = None
-    """对手姓名（队伍名）"""
-    score: Optional[str] = None
-    """比分（本方:对手）"""
-    create_time: Optional[str] = None
-    """比赛日期"""
-    offense: float
-    defense: float
-    serve: float
-    receive: float
-    anti_pressure: float
-    field: float
-    consecutive_score: float
-    consecutive_lose: float
+    score_team_id: int = Field(..., description="记分 ID（对应记分表主键）")
+    battle_id: int = Field(..., description="对阵 ID")
+    opponent: Optional[str] = Field(None, description="对手姓名（队伍名）")
+    score: Optional[str] = Field(None, description="比分（本方:对手，字符串）")
+    create_time: Optional[str] = Field(None, description="比赛日期（YYYY-MM-DD）")
+    offense: float = Field(..., description="进攻得分（0-100，本方有发球权时得分率归一化）")
+    defense: float = Field(..., description="防守得分（0-100，本方接对方发球时得分率归一化）")
+    serve: float = Field(..., description="发球得分（0-100，本方发球回合得分率归一化）")
+    receive: float = Field(..., description="接发得分（0-100，本方接发回合得分率归一化）")
+    anti_pressure: float = Field(..., description="抗压得分（0-100，落后/逆转/关键分表现）")
+    field: float = Field(..., description="场区得分（0-100，换边前后落差越小分越高）")
+    consecutive_score: float = Field(..., description="平均连续得分")
+    consecutive_lose: float = Field(..., description="平均连续失分")
 
 
 class RadarProfile(BaseModel):
     """单名选手的六维雷达图"""
-    name: Optional[str] = None
-    """选手姓名"""
-    card_code: str
-    """选手身份证号"""
-    matches: int
-    """参与计算的单打场次"""
-    total_singles: int
-    """历史全部单打场次"""
-    offense: Optional[float] = None
-    """进攻得分（发球权得分率归一化）"""
-    defense: Optional[float] = None
-    """防守得分（接发权得分率归一化）"""
-    serve: Optional[float] = None
-    """发球"""
-    receive: Optional[float] = None
-    """接发"""
-    anti_pressure: Optional[float] = None
-    """抗压"""
-    field: Optional[float] = None
-    """场区（换边适应性）"""
-    consecutive_score: Optional[float] = None
-    """平均连续得分"""
-    consecutive_lose: Optional[float] = None
-    """平均连续失分"""
-    match_details: list[RadarMatchDetail] = Field(default_factory=list)
-    """各单场明细"""
+    name: Optional[str] = Field(None, description="选手姓名")
+    card_code: str = Field(..., description="选手身份证号")
+    matches: int = Field(..., description="参与计算的单打场次（即本次统计的最近 N 场）")
+    total_singles: int = Field(..., description="历史全部单打场次")
+    offense: Optional[float] = Field(None, description="进攻得分（发球权得分率归一化，0-100）")
+    defense: Optional[float] = Field(None, description="防守得分（接发权得分率归一化，0-100）")
+    serve: Optional[float] = Field(None, description="发球得分（0-100）")
+    receive: Optional[float] = Field(None, description="接发得分（0-100）")
+    anti_pressure: Optional[float] = Field(None, description="抗压得分（0-100）")
+    field: Optional[float] = Field(None, description="场区得分（换边适应性，0-100）")
+    consecutive_score: Optional[float] = Field(None, description="平均连续得分")
+    consecutive_lose: Optional[float] = Field(None, description="平均连续失分")
+    match_details: list[RadarMatchDetail] = Field(
+        default_factory=list, description="参与统计的各单场明细",
+    )
 
 
 class RadarResponse(BaseModel):
     """六维雷达图响应体"""
-    success: bool = True
-    data: RadarProfile
+    success: bool = Field(..., description="请求是否成功")
+    data: RadarProfile = Field(..., description="选手六维雷达图（含各场明细）")
