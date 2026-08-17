@@ -41,54 +41,11 @@ def norm_offdef(raw: float) -> float:
 
 
 # ──────────────────────────────────────────────
-# 一、身份证 → 选手身份
+# 一、battle_to_score_team（复用 battle_card_service）
 # ──────────────────────────────────────────────
-async def card_to_player(db: AsyncSession, card_code: str) -> Optional[dict]:
-    """根据身份证查选手基本信息(user_setting_id, name, event_id)。"""
-    stmt = text("""
-        SELECT user_setting_id, name, event_id, card_code, group_sn
-        FROM motion_event_apply_user_setting
-        WHERE card_code = :code AND is_del = 0
-        LIMIT 1
-    """)
-    result = await db.execute(stmt, {"code": card_code})
-    row = result.fetchone()
-    if row is None:
-        return None
-    return dict(row._mapping)
-
-
-async def player_to_battles(db: AsyncSession, user_setting_id: int, name: str) -> list[dict]:
-    """找到该选手参加的所有 battle（单打/双打均含，后续按 score_type 过滤）。"""
-    stmt = text("""
-        SELECT DISTINCT b.battle_id, b.event_id, b.player_one_name, b.player_two_name,
-               b.player_one_user_ids, b.player_two_user_ids, b.battle_time
-        FROM motion_event_layout_stage_battle b
-        WHERE (b.player_one_user_ids LIKE :like_one OR b.player_two_user_ids LIKE :like_two)
-          AND b.is_del = 0
-    """)
-    result = await db.execute(stmt, {
-        "like_one": f"%{user_setting_id}%",
-        "like_two": f"%{user_setting_id}%",
-    })
-    battles = [dict(r._mapping) for r in result.fetchall()]
-
-    # 姓名兜底（不依赖 user_setting_id 匹配）
-    if not battles:
-        stmt2 = text("""
-            SELECT DISTINCT b.battle_id, b.event_id, b.player_one_name, b.player_two_name,
-                   b.player_one_user_ids, b.player_two_user_ids, b.battle_time
-            FROM motion_event_layout_stage_battle b
-            WHERE (b.player_one_name = :name OR b.player_two_name = :name)
-              AND b.is_del = 0
-        """)
-        r2 = await db.execute(stmt2, {"name": name})
-        battles = [dict(r._mapping) for r in r2.fetchall()]
-    return battles
-
-
 async def battle_to_score_team(db: AsyncSession, battle_id: int, user_setting_id: int) -> Optional[dict]:
     """battle_id → 单打 score_team。若是双打返回 None。"""
+    # 检查 user_setting_id 是否在该 battle 中
     stmt = text("""
         SELECT player_one_user_ids, player_two_user_ids
         FROM motion_event_layout_stage_battle WHERE battle_id = :bid
@@ -97,7 +54,6 @@ async def battle_to_score_team(db: AsyncSession, battle_id: int, user_setting_id
     b = result.fetchone()
     if b is None:
         return None
-    # 用 dict() 确保键名访问
     b = dict(b._mapping)
     one_ids = (b.get("player_one_user_ids") or "")
     two_ids = (b.get("player_two_user_ids") or "")
@@ -361,13 +317,30 @@ def calc_field(games: dict) -> dict:
 # ──────────────────────────────────────────────
 async def profile_player_by_card(db: AsyncSession, card_code: str, limit: int = MAX_RECENT_GAMES) -> dict:
     """按身份证计算选手最近 limit 场单打的六维雷达图。"""
-    player = await card_to_player(db, card_code)
-    if player is None:
-        raise ValueError(f"未找到身份证 {card_code} 对应的报名选手")
-    name = player["name"]
-    user_setting_id = player["user_setting_id"]
+    from services.battle_card_service import get_battles_by_card_code
 
-    battles = await player_to_battles(db, user_setting_id, name)
+    # 使用通用方法获取该选手参加的所有 battle
+    battles = await get_battles_by_card_code(db, card_code, limit=limit * 2)
+
+    if not battles:
+        raise ValueError(f"未找到身份证 {card_code} 对应的报名选手")
+
+    # 提取选手姓名（从 motion_event_apply_user_setting 查询）
+    name = None
+    user_setting_id = None
+    # 查询该 card_code 对应的 user_setting_id 和姓名
+    stmt = text("""
+        SELECT user_setting_id, name FROM motion_event_apply_user_setting
+        WHERE card_code = :card_code AND is_del = 0 LIMIT 1
+    """)
+    result = await db.execute(stmt, {"card_code": card_code})
+    row = result.fetchone()
+    if row:
+        user_setting_id = row[0]
+        name = row[1]
+
+    if name is None or user_setting_id is None:
+        raise ValueError(f"未找到身份证 {card_code} 对应的报名选手")
 
     # 逐个 battle 关联到单打 score_team，过滤双打
     singles = []

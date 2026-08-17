@@ -217,52 +217,53 @@ async def extract_importable_matches(
     返回:
         自然顺序（battle_time 升序，为 NULL 排最后）匹配列表。
     """
-    stmt = EXTRACT_SQL
-    params = {}
-    if limit is not None:
-        stmt = text(f"SELECT * FROM ({stmt}) t ORDER BY t.battle_time LIMIT :limit")
-        params = {"limit": limit}
-    else:
-        stmt = text(f"SELECT * FROM ({stmt}) t ORDER BY t.battle_time")
+    from services.battle_card_service import get_card_codes_by_battle_id
 
-    result = await session.execute(stmt, params)
-    rows = result.mappings().all()
+    # Step 1: 获取所有符合条件的 battle_id
+    stmt_battles = text("""
+        SELECT battle_id
+        FROM motion_event_layout_stage_battle
+        WHERE status = 2
+          AND is_empty = 0
+          AND player_one_score != player_two_score
+          AND player_one_score >= 0 AND player_two_score >= 0
+        ORDER BY battle_time
+    """)
+    if limit:
+        stmt_battles = text(f"SELECT battle_id FROM ({stmt_battles}) t LIMIT :limit")
 
-    matches: list[ImportedMatch] = []
+    result = await session.execute(stmt_battles, {"limit": limit} if limit else {})
+    battle_ids = [row[0] for row in result.fetchall()]
+
+    # Step 2: 逐个 battle 获取身份证号
+    matches = []
     skipped_dup = 0
-    for r in rows:
-        match_type = r["match_type"]
-        if match_type == "singles":
-            team_a = [r["one_c1"]]
-            team_b = [r["two_c1"]]
-        else:
-            team_a = [r["one_c1"], r["one_c2"]]
-            team_b = [r["two_c1"], r["two_c2"]]
+    for battle_id in battle_ids:
+        card_info = await get_card_codes_by_battle_id(session, battle_id)
+        if card_info and card_info["is_valid"]:
+            # 检查是否有重复的 card_code
+            all_codes = card_info["team_a"] + card_info["team_b"]
+            if len(set(all_codes)) != len(all_codes):
+                skipped_dup += 1
+                continue
 
-        all_codes = team_a + team_b
+            # 确定比赛类型
+            if len(card_info["team_a"]) == 1:
+                match_type = "singles"
+            else:
+                match_type = "doubles"
 
-        # SQL 端已用 REGEXP 过滤脏身份证号，此处二次校验兜底
-        if not all(code is not None and _is_valid_card(code) for code in all_codes):
-            continue
-
-        # 最终兜底：同一场参赛的所有选手 card_code 必须互不相同。
-        # 若同一条卡被多个 user_setting_id 登记（报名同人重复），一律跳过，
-        # 避免 elo_player_rating 主键冲突 / UPDATE 0-matched / 积分错乱。
-        if len(set(all_codes)) != len(all_codes):
-            skipped_dup += 1
-            continue
-
-        matches.append(ImportedMatch(
-            event_id=r["event_id"],
-            battle_id=r["battle_id"],
-            source_order=r["source_order"] or 0,
-            played_at=r["battle_time"],
-            score_a=r["score_one"],
-            score_b=r["score_two"],
-            match_type=match_type,
-            team_a=[c for c in team_a if c],
-            team_b=[c for c in team_b if c],
-        ))
+            matches.append(ImportedMatch(
+                event_id=card_info["event_id"],
+                battle_id=card_info["battle_id"],
+                source_order=0,
+                played_at=card_info["battle_time"],
+                score_a=card_info["score_a"],
+                score_b=card_info["score_b"],
+                match_type=match_type,
+                team_a=card_info["team_a"],
+                team_b=card_info["team_b"],
+            ))
 
     if skipped_dup:
         print(f"  [INFO] 跳过 {skipped_dup} 场参赛选手 card_code 有重复的对阵"

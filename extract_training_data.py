@@ -153,35 +153,55 @@ async def extract_training_matches(
     Returns:
         按 event_id + event_index 排序的比赛列表。
     """
+    from services.battle_card_service import get_card_codes_by_battle_id
+
     async with AsyncSessionLocal() as session:
-        result = await session.execute(EXTRACT_SQL, {"limit": limit})
-        rows = result.fetchall()
+        # Step 1: 获取所有符合条件的 battle_id
+        stmt_battles = text("""
+            SELECT battle_id
+            FROM motion_event_layout_stage_battle
+            WHERE status = 2
+              AND is_empty = 0
+              AND player_one_name IS NOT NULL
+              AND player_two_name IS NOT NULL
+              AND player_one_score != player_two_score
+              AND player_one_score >= 0 AND player_two_score >= 0
+            ORDER BY event_id, event_index
+            LIMIT :limit
+        """)
+        result = await session.execute(stmt_battles, {"limit": limit})
+        battle_ids = [row[0] for row in result.fetchall()]
 
-    matches: list[TrainingMatch] = []
-    skipped = 0
+        # Step 2: 逐个 battle 获取身份证号
+        matches = []
+        skipped = 0
+        for battle_id in battle_ids:
+            try:
+                card_info = await get_card_codes_by_battle_id(session, battle_id)
+                if card_info and card_info["is_valid"]:
+                    # 构造 TrainingMatch
+                    team_a = [PlayerInfo(card_code=c, name=n)
+                             for c, n in zip(card_info["team_a"], card_info["team_a_names"])]
+                    team_b = [PlayerInfo(card_code=c, name=n)
+                             for c, n in zip(card_info["team_b"], card_info["team_b_names"])]
 
-    for row in rows:
-        try:
-            team_a = _parse_players(row.player_one_name, row.player_one_card)
-            team_b = _parse_players(row.player_two_name, row.player_two_card)
-
-            match = TrainingMatch(
-                event_id=row.event_id,
-                battle_id=row.battle_id,
-                event_index=row.event_index,
-                battle_time=str(row.battle_time) if row.battle_time else None,
-                project_type=row.project_type or 1,
-                team_a=team_a,
-                team_b=team_b,
-                score_a=row.player_one_score,
-                score_b=row.player_two_score,
-                winner_side=_determine_winner(row.player_one_score, row.player_two_score),
-            )
-            matches.append(match)
-        except Exception as e:
-            skipped += 1
-            if skipped <= 5:
-                print(f"  [WARN] 跳过 battle_id={row.battle_id}: {e}", file=sys.stderr)
+                    match = TrainingMatch(
+                        event_id=card_info["event_id"],
+                        battle_id=card_info["battle_id"],
+                        event_index=0,  # 新接口没有 event_index，设为 0
+                        battle_time=str(card_info["battle_time"]) if card_info["battle_time"] else None,
+                        project_type=card_info["project_type"],
+                        team_a=team_a,
+                        team_b=team_b,
+                        score_a=card_info["score_a"],
+                        score_b=card_info["score_b"],
+                        winner_side=_determine_winner(card_info["score_a"], card_info["score_b"]),
+                    )
+                    matches.append(match)
+            except Exception as e:
+                skipped += 1
+                if skipped <= 5:
+                    print(f"  [WARN] 跳过 battle_id={battle_id}: {e}", file=sys.stderr)
 
     print(f"提取完成: {len(matches)} 场比赛, 跳过 {skipped} 场", file=sys.stderr)
     return matches
