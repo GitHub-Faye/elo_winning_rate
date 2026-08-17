@@ -446,3 +446,76 @@ class MatchDeleteErrorResponse(BaseModel):
     event_id: Optional[int] = Field(None, description="赛事 ID")
     battle_id: Optional[int] = Field(None, description="对阵 ID")
     code: Optional[str] = Field(None, description="错误码，如 match_not_found")
+
+
+# ── 比赛结果分析模型 ──
+
+
+class MatchPlayerResult(BaseModel):
+    """单名选手在本场比赛中的基础变化"""
+    card_code: str = Field(..., description="选手身份证号")
+    team_side: str = Field(..., description="所在方 A / B")
+    is_winner: bool = Field(..., description="本场是否获胜")
+    rating_before: float = Field(..., description="赛前 Elo")
+    rating_after: float = Field(..., description="赛后 Elo")
+    delta: float = Field(..., description="Elo 变化量（正=加分，负=减分）")
+    score_self: int = Field(..., description="本方得分")
+    score_opponent: int = Field(..., description="对方得分")
+    rank_before: Optional[str] = Field(
+        None, description="赛前段位（场次<2 为定级中）",
+    )
+    rank_after: Optional[str] = Field(
+        None, description="赛后段位（场次<2 为定级中）",
+    )
+
+
+class MatchAnalysis(BaseModel):
+    """指定选手的详细分析（含排名变化和段位差分）"""
+    card_code: str = Field(..., description="选手身份证号")
+    delta: float = Field(..., description="Elo 变化量")
+    rating_before: float = Field(..., description="赛前 Elo")
+    rating_after: float = Field(..., description="赛后 Elo")
+    rank_before: Optional[str] = Field(None, description="赛前段位")
+    rank_after: Optional[str] = Field(None, description="赛后段位")
+    points_to_next_tier: Optional[float] = Field(
+        None, description="距下一段位的分数差（null=已最高段或定级中）",
+    )
+    next_tier: Optional[str] = Field(
+        None, description="下一段位名称（null=已最高段或定级中）",
+    )
+    region_rank_before: Optional[int] = Field(
+        None, description="赛前地区排名（仅 games>=2 的已定级选手参与）",
+    )
+    region_rank_after: Optional[int] = Field(
+        None, description="赛后地区排名",
+    )
+    region_total: Optional[int] = Field(
+        None, description="地区已定级选手总数",
+    )
+    region_rank_change: Optional[int] = Field(
+        None, description="排名变化（正=上升，负=下降，0=不变）",
+    )
+
+
+class MatchDetailData(BaseModel):
+    """比赛结果分析数据"""
+    battle_id: int = Field(..., description="对阵 ID")
+    event_id: int = Field(..., description="赛事 ID")
+    match_type: str = Field(
+        ..., description="比赛类型: singles=单打 / doubles=双打",
+    )
+    score_a: int = Field(..., description="A 方得分")
+    score_b: int = Field(..., description="B 方得分")
+    played_at: Optional[datetime] = Field(None, description="比赛时间")
+    players: list[MatchPlayerResult] = Field(
+        ..., description="所有参赛选手的基础变化",
+    )
+    analysis: Optional[MatchAnalysis] = Field(
+        None, description="指定选手的详细分析（仅传入 card_code 时返回）",
+    )
+
+
+class MatchDetailResponse(BaseModel):
+    """比赛结果分析响应体"""
+    success: bool = Field(..., description="请求是否成功")
+    data: MatchDetailData = Field(..., description="比赛结果分析数据")

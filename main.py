@@ -7,6 +7,7 @@ from routers.rating import router as rating_router
 from routers.event_rating import router as event_rating_router
 from routers.radar import router as radar_router
 from routers.player_records import router as player_records_router
+from routers.match_detail import router as match_detail_router
 
 app = FastAPI(title="ELO Winning Rate")
 app.include_router(player_records_router, prefix="")
@@ -17,6 +18,7 @@ app.include_router(head_to_head_router, prefix="")
 app.include_router(rating_router, prefix="")
 app.include_router(event_rating_router, prefix="")
 app.include_router(radar_router, prefix="")
+app.include_router(match_detail_router, prefix="")
 
 
 @app.get("/")
