@@ -384,9 +384,9 @@ async def profile_player_by_card(db: AsyncSession, card_code: str, limit: int = 
         return {
             "name": name, "card_code": card_code, "matches": 0,
             "total_singles": 0,
-            "offense": None, "defense": None, "serve": None, "receive": None,
-            "anti_pressure": None, "field": None,
-            "consecutive_score": None, "consecutive_lose": None,
+            "offense": 0, "defense": 0, "serve": 0, "receive": 0,
+            "anti_pressure": 0, "field": 0,
+            "consecutive_score": 0, "consecutive_lose": 0,
             "match_details": [],
         }
 
