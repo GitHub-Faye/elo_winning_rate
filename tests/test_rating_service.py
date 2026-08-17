@@ -6,6 +6,7 @@
   - 段位边界（1900=9段 → 1200=2段，1199=1段）
   - 批量部分缺失（未注册选手）→ 返回 null
   - 空列表 / 重复身份证
+  - 地区排名（province/city 筛选 + 排名计算）
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from services.rating_service import (
     get_badminton_rank,
     get_player_ratings,
     get_player_ratings_by_card,
+    get_player_ratings_with_ranking,
 )
 
 CARD_A = "110101199001011234"
@@ -179,3 +181,177 @@ async def test_query_request_validation():
     assert len(req.card_codes) == 1
     with pytest.raises(Exception):
         RatingQueryRequest(card_codes=[CARD_A] * 60)  # 超过上限报错
+
+
+# ── 地区排名测试 ──
+
+
+def _make_db_with_region(player_rows: list, region_rows: list) -> AsyncMock:
+    """创建 mock DB，第一次 execute 返回 player_rows，第二次返回 region_rows。
+
+    get_player_ratings_with_ranking 执行两次查询：
+    1. 查询选手积分（scalars().all()）
+    2. 查询地区已定级选手（.all()）
+    """
+    db = AsyncMock(spec=AsyncSession)
+
+    # 第一次调用：查询选手积分
+    ex1 = MagicMock()
+    ex1.scalars().all.return_value = player_rows
+
+    # 第二次调用：查询地区选手
+    ex2 = MagicMock()
+    ex2.all.return_value = region_rows
+
+    db.execute = AsyncMock(side_effect=[ex1, ex2])
+    return db
+
+
+def _make_region_row(card_code: str, rating: float):
+    """构造一条地区排名查询结果（SimpleNamespace）。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(card_code=card_code, rating=rating)
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_with_province_ranking():
+    """省份筛选：返回正确的排名和总人数"""
+    # 查询目标选手
+    player_rows = [_make_row(CARD_A, 1650.0, 10, 7, 3)]
+    # 地区已定级选手（3 人，CARD_A 排第 2）
+    region_rows = [
+        _make_region_row(CARD_B, 1700.0),  # 第 1 名
+        _make_region_row(CARD_A, 1650.0),  # 第 2 名
+        _make_region_row(CARD_C, 1500.0),  # 第 3 名
+    ]
+    db = _make_db_with_region(player_rows, region_rows)
+
+    data = await get_player_ratings_with_ranking(
+        db, [CARD_A], "badminton", province="山西省",
+    )
+
+    assert data.province == "山西省"
+    assert data.city is None
+    assert data.results[0].region_rank == 2
+    assert data.results[0].region_total == 3
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_with_city_ranking():
+    """城市筛选优先于省份"""
+    player_rows = [_make_row(CARD_A, 1650.0, 10)]
+    region_rows = [
+        _make_region_row(CARD_A, 1650.0),
+        _make_region_row(CARD_B, 1500.0),
+    ]
+    db = _make_db_with_region(player_rows, region_rows)
+
+    data = await get_player_ratings_with_ranking(
+        db, [CARD_A], "badminton", province="山西省", city="太原市",
+    )
+
+    # city 优先，province 被忽略
+    assert data.province == "山西省"
+    assert data.city == "太原市"
+    assert data.results[0].region_rank == 1
+    assert data.results[0].region_total == 2
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_no_region_filter():
+    """无地区筛选时 rank/total 为 None"""
+    player_rows = [_make_row(CARD_A, 1650.0, 10)]
+    db = _make_db(player_rows)  # 只需一次查询
+
+    data = await get_player_ratings_with_ranking(
+        db, [CARD_A], "badminton",
+    )
+
+    assert data.province is None
+    assert data.city is None
+    assert data.results[0].region_rank is None
+    assert data.results[0].region_total is None
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_provisional_player_not_ranked():
+    """定级中选手（games < 2）不参与排名，但返回 region_total"""
+    player_rows = [_make_row(CARD_A, 1500.0, 1)]  # 只有 1 场，定级中
+    region_rows = [
+        _make_region_row(CARD_B, 1700.0),
+        _make_region_row(CARD_C, 1500.0),
+    ]
+    db = _make_db_with_region(player_rows, region_rows)
+
+    data = await get_player_ratings_with_ranking(
+        db, [CARD_A], "badminton", province="山西省",
+    )
+
+    assert data.results[0].region_rank is None  # 定级中不参与排名
+    assert data.results[0].region_total == 2
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_new_player_not_in_region():
+    """新选手（无记录）不参与排名，但返回 region_total"""
+    player_rows = []  # 无记录
+    region_rows = [
+        _make_region_row(CARD_B, 1700.0),
+    ]
+    db = _make_db_with_region(player_rows, region_rows)
+
+    data = await get_player_ratings_with_ranking(
+        db, [CARD_A], "badminton", province="山西省",
+    )
+
+    assert data.results[0].is_new is True
+    assert data.results[0].region_rank is None
+    assert data.results[0].region_total == 1
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_region_empty():
+    """地区无已定级选手时 total=0"""
+    player_rows = [_make_row(CARD_A, 1650.0, 10)]
+    region_rows = []  # 地区无已定级选手
+    db = _make_db_with_region(player_rows, region_rows)
+
+    data = await get_player_ratings_with_ranking(
+        db, [CARD_A], "badminton", province="山西省",
+    )
+
+    assert data.results[0].region_rank is None
+    assert data.results[0].region_total == 0
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_tie_breaking():
+    """同分按 card_code 升序排序（lexicographic）"""
+    player_rows = [_make_row(CARD_A, 1650.0, 10)]
+    # 两个选手同分，CARD_A 字典序更小 → 排名更高
+    region_rows = [
+        _make_region_row(CARD_A, 1650.0),  # card_code 更小，排第 1
+        _make_region_row(CARD_B, 1650.0),  # card_code 更大，排第 2
+    ]
+    db = _make_db_with_region(player_rows, region_rows)
+
+    data = await get_player_ratings_with_ranking(
+        db, [CARD_A], "badminton", province="山西省",
+    )
+
+    assert data.results[0].region_rank == 1  # CARD_A 字典序更小，排名更高
+    assert data.results[0].region_total == 2
+
+
+@pytest.mark.asyncio
+async def test_rating_query_request_with_region():
+    """POST 请求体支持 region 参数"""
+    req = RatingQueryRequest(
+        card_codes=[CARD_A],
+        sport_type="badminton",
+        province="山西省",
+        city="太原市",
+    )
+    assert req.sport_type == "badminton"
+    assert req.province == "山西省"
+    assert req.city == "太原市"

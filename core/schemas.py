@@ -214,6 +214,15 @@ class RatingQueryRequest(BaseModel):
         ..., min_length=1, max_length=50,
         description="选手身份证号（card_code）列表。服务端自动去重，最多 50 个。",
     )
+    sport_type: Optional[str] = Field(
+        None, description="运动品类（默认 badminton）",
+    )
+    province: Optional[str] = Field(
+        None, description="筛选省份（如「山西省」）",
+    )
+    city: Optional[str] = Field(
+        None, description="筛选城市（如「太原市」，优先级高于 province）",
+    )
 
     @model_validator(mode="after")
     def _dedupe_card_codes(self) -> RatingQueryRequest:
@@ -241,11 +250,21 @@ class PlayerRatingResult(BaseModel):
     )
     is_provisional: bool = Field(False, description="是否处于定级期（总场次 < 2）")
     is_new: bool = Field(False, description="是否未建档（无 elo_player_rating 记录）")
+    region_rank: Optional[int] = Field(
+        None,
+        description="在指定地区内的排名（仅 games>=2 的已定级选手参与排名；无地区筛选或未定级时为 null）",
+    )
+    region_total: Optional[int] = Field(
+        None,
+        description="指定地区内的已定级选手总数（仅 games>=2；无地区筛选时为 null）",
+    )
 
 
 class RatingQueryData(BaseModel):
     """批量积分查询数据"""
     sport_type: str = Field(..., description="运动品类（如 badminton）")
+    province: Optional[str] = Field(None, description="筛选的省份（未筛选为 null）")
+    city: Optional[str] = Field(None, description="筛选的城市（未筛选为 null）")
     results: list[PlayerRatingResult] = Field(..., description="各选手的积分查询结果")
 
 

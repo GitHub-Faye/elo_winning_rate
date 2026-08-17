@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -112,3 +114,64 @@ async def get_player_ratings_by_card(
     """查询单名选手积分（复用批量逻辑）。"""
     data = await get_player_ratings(db, [card_code], sport_type)
     return data.results[0]
+
+
+async def get_player_ratings_with_ranking(
+    db: AsyncSession,
+    card_codes: list[str],
+    sport_type: str,
+    province: Optional[str] = None,
+    city: Optional[str] = None,
+) -> RatingQueryData:
+    """批量查询选手积分 + 地区排名。
+
+    在 get_player_ratings 基础上，若提供了 province/city，
+    查询该地区所有已定级选手（games >= 2），计算目标选手的排名。
+
+    排名规则：按 rating DESC, card_code ASC 排序，1-based rank。
+    """
+    # Step 1: 获取基础积分数据
+    data = await get_player_ratings(db, card_codes, sport_type)
+    data.province = province
+    data.city = city
+
+    # Step 2: 若无地区筛选，直接返回（region_rank/region_total 保持 None）
+    if not province and not city:
+        return data
+
+    # Step 3: 查询该地区所有已定级选手
+    conditions = [
+        EloPlayerRating.sport_type == sport_type,
+        EloPlayerRating.games >= PROVISIONAL_GAMES,
+    ]
+    if city:
+        # city 优先级高于 province
+        conditions.append(EloPlayerRating.city == city)
+    elif province:
+        conditions.append(EloPlayerRating.province == province)
+
+    stmt = select(
+        EloPlayerRating.card_code,
+        EloPlayerRating.rating,
+    ).where(*conditions)
+
+    result_db = await db.execute(stmt)
+    region_rows = result_db.all()
+
+    # Step 4: 排序并构建 rank_map（rating DESC, card_code ASC）
+    region_rows.sort(key=lambda r: (-float(r.rating), r.card_code))
+    rank_map = {row.card_code: idx + 1 for idx, row in enumerate(region_rows)}
+    region_total = len(region_rows)
+
+    # Step 5: 为每个请求的选手填充排名
+    for result in data.results:
+        if result.is_new or result.is_provisional:
+            # 未建档或定级中的选手不参与排名
+            result.region_total = region_total
+            continue
+
+        rank = rank_map.get(result.card_code)
+        result.region_rank = rank
+        result.region_total = region_total
+
+    return data
