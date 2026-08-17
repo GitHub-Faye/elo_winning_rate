@@ -18,6 +18,7 @@ from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from core.models import EloMatchRecord, EloPlayerRating
 from core.schemas import (
@@ -132,6 +133,19 @@ class EloService:
                     r.losses,
                 ))
         return states
+
+    # ── 归属地区查询 ──
+
+    async def _fetch_region(self, card_code: str) -> tuple[Optional[str], Optional[str]]:
+        """从 motion_user 表查询选手的归属省份和城市。"""
+        result = await self.db.execute(text(
+            "SELECT address_province, address_city "
+            "FROM motion_user WHERE BINARY id_code = :card_code LIMIT 1"
+        ), {"card_code": card_code})
+        row = result.first()
+        if row and (row[0] or row[1]):
+            return row[0], row[1]
+        return None, None
 
     # ── 单打 ──
 
@@ -266,6 +280,8 @@ class EloService:
         delta_losses = result.losses_after - player.losses
 
         if rating is None:
+            # 查询 motion_user 获取归属地区（仅在创建新选手时）
+            province, city = await self._fetch_region(player.card_code)
             new_rating = EloPlayerRating(
                 card_code=player.card_code,
                 sport_type=CURRENT_SPORT,
@@ -276,6 +292,8 @@ class EloService:
                 draws=0,
                 highest_rating=Decimal(str(result.rating_after)).quantize(Decimal("0.01")),
                 lowest_rating=Decimal(str(result.rating_after)).quantize(Decimal("0.01")),
+                province=province,
+                city=city,
             )
             self.db.add(new_rating)
         else:

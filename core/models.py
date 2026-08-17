@@ -85,6 +85,16 @@ class EloPlayerRating(SQLModel, table=True):
             "server_default": text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
         },
     )
+    province: Optional[str] = Field(
+        default=None,
+        sa_column=Column("province", VARCHAR(64), nullable=True,
+                         comment="归属省份（来自 motion_user.address_province）"),
+    )
+    city: Optional[str] = Field(
+        default=None,
+        sa_column=Column("city", VARCHAR(64), nullable=True,
+                         comment="归属城市（来自 motion_user.address_city）"),
+    )
 
 
 class EloMatchRecord(SQLModel, table=True):
