@@ -572,3 +572,258 @@ class TestEdgeCases:
             assert hasattr(resp.data, "team_b")
             assert len(resp.data.team_a) == 1
             assert len(resp.data.team_b) == 1
+
+
+# ── 多局 Elo 均值测试 ──
+
+
+class TestMultiGameEloAverage:
+    """多局比赛逐局 Elo 计算并取均值的测试"""
+
+    def _make_multi_game_battle(
+        self,
+        item_score: str,
+        team_a: list[str] | None = None,
+        team_b: list[str] | None = None,
+    ) -> dict:
+        """构造多局比赛的 battle info mock。"""
+        if team_a is None:
+            team_a = [CARD_A]
+        if team_b is None:
+            team_b = [CARD_B]
+        # 计算总分用于 score_a/score_b（局数）
+        from core.score_parser import parse_item_score
+        total_a, total_b = parse_item_score(item_score)
+        return {
+            "battle_id": 500,
+            "event_id": 1,
+            "project_type": 1 if len(team_a) == 1 else 2,
+            "team_a": team_a,
+            "team_b": team_b,
+            "team_a_names": ["选手A"],
+            "team_b_names": ["选手B"],
+            "score_a": total_a,
+            "score_b": total_b,
+            "item_score": item_score,
+            "battle_time": datetime(2024, 1, 1),
+            "is_valid": True,
+            "missing_count": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_multi_game_averages_deltas(self):
+        """三局比赛（A赢1局B赢2局）→ delta 为各局均值。"""
+        from elo_compute import (
+            EloConfig,
+            MatchInput,
+            SideInput,
+            compute_match_pair,
+        )
+
+        config = EloConfig()
+
+        # 各局独立计算（注意：s_a/s_b 是胜负值，每局不同）
+        # Game 1: 21:11 → A胜 s_a=1.0, s_b=0.0
+        r_a1, r_b1 = compute_match_pair(
+            SideInput(rating=1500.0, games=0, team_size=1, actual_score=1.0, wins=0, losses=0),
+            SideInput(rating=1500.0, games=0, team_size=1, actual_score=0.0, wins=0, losses=0),
+            MatchInput(score_a=21, score_b=11, event_weight=1.0), config,
+        )
+        # Game 2: 18:21 → B胜 s_a=0.0, s_b=1.0
+        r_a2, r_b2 = compute_match_pair(
+            SideInput(rating=1500.0, games=0, team_size=1, actual_score=0.0, wins=0, losses=0),
+            SideInput(rating=1500.0, games=0, team_size=1, actual_score=1.0, wins=0, losses=0),
+            MatchInput(score_a=18, score_b=21, event_weight=1.0), config,
+        )
+        # Game 3: 12:21 → B胜 s_a=0.0, s_b=1.0
+        r_a3, r_b3 = compute_match_pair(
+            SideInput(rating=1500.0, games=0, team_size=1, actual_score=0.0, wins=0, losses=0),
+            SideInput(rating=1500.0, games=0, team_size=1, actual_score=1.0, wins=0, losses=0),
+            MatchInput(score_a=12, score_b=21, event_weight=1.0), config,
+        )
+
+        expected_avg_delta_a = (r_a1.delta + r_a2.delta + r_a3.delta) / 3
+        expected_avg_delta_b = (r_b1.delta + r_b2.delta + r_b3.delta) / 3
+
+        # Mock DB
+        mock_db = _mock_singles_db()
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = self._make_multi_game_battle("21:11|18:21|12:21")
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:11|18:21|12:21", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            req = EloRecordRequest(battle_id=500, event_weight=1.0)
+            resp = await service.record_match(req)
+
+        ra = resp.data.team_a[0]
+        rb = resp.data.team_b[0]
+
+        assert abs(ra.delta - expected_avg_delta_a) < 0.01, (
+            f"A 的 delta 应为各局均值: 期望 {expected_avg_delta_a:.4f}, 实际 {ra.delta:.4f}"
+        )
+        assert abs(rb.delta - expected_avg_delta_b) < 0.01, (
+            f"B 的 delta 应为各局均值: 期望 {expected_avg_delta_b:.4f}, 实际 {rb.delta:.4f}"
+        )
+        # rating_after == rating_before + delta
+        assert abs(ra.rating_after - (ra.rating_before + ra.delta)) < 0.01
+        assert abs(rb.rating_after - (rb.rating_before + rb.delta)) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_multi_game_winner_based_on_game_wins(self):
+        """三局比赛 A赢1局B赢2局 → B 是胜者（按赢的局数，非总分）。"""
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            # A总分51 > B总分53？不，A总分51 < B总分53
+            # 但胜负按局数：A赢1局(21:11)，B赢2局(18:21, 12:21) → B胜
+            mock_get_cards.return_value = self._make_multi_game_battle("21:11|18:21|12:21")
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:11|18:21|12:21", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db = _mock_singles_db()
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+
+        # B 赢了 2 局 > A 赢了 1 局 → B 胜，A 负
+        ra = resp.data.team_a[0]
+        rb = resp.data.team_b[0]
+        assert ra.delta < 0, f"A 局数较少应减分, delta={ra.delta}"
+        assert rb.delta > 0, f"B 局数较多应加分, delta={rb.delta}"
+
+    @pytest.mark.asyncio
+    async def test_winner_by_game_wins_not_total_score(self):
+        """A总分低于B但赢了更多局 → A是胜者（按局数判定，非总分）。
+
+        "21:19|21:19|5:21" → A赢2局(21:19,21:19)，B赢1局(5:21)
+        A总分=47 < B总分=59，但A赢了2局 → A胜
+        """
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = self._make_multi_game_battle("21:19|21:19|5:21")
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:19|21:19|5:21", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db = _mock_singles_db()
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+
+        # A 赢了 2 局 > B 赢了 1 局 → A 胜（尽管 A 总分更低）
+        ra = resp.data.team_a[0]
+        rb = resp.data.team_b[0]
+        assert ra.delta > 0, f"A 赢了更多局应加分, delta={ra.delta}"
+        assert rb.delta < 0, f"B 赢了更少局应减分, delta={rb.delta}"
+
+    @pytest.mark.asyncio
+    async def test_single_game_identical_to_before(self):
+        """单局比赛行为与改动前完全一致。"""
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = self._make_multi_game_battle("21:15")
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db = _mock_singles_db()
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+
+        ra = resp.data.team_a[0]
+        rb = resp.data.team_b[0]
+        # 单局时均值 = 唯一一局的值
+        assert ra.delta > 0
+        assert rb.delta < 0
+        assert abs(ra.delta + rb.delta) < 1, (
+            f"单局双方 delta 应近似对称: {ra.delta} vs {rb.delta}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_multi_game_doubles_averages(self):
+        """双打多局比赛 → 四人 delta 各自为均值，胜负按局数。"""
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            # A赢1局(21:11)，B赢2局(18:21, 12:21) → B胜
+            mock_get_cards.return_value = self._make_multi_game_battle(
+                "21:11|18:21|12:21",
+                team_a=[CARD_A, CARD_B],
+                team_b=[CARD_C, CARD_D],
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:11|18:21|12:21", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db = AsyncMock(spec=AsyncSession)
+            mock_db.add = MagicMock()
+            mock_db.flush = AsyncMock()
+
+            # _load_player_states x2, _upsert_rating x4, _fetch_region x4
+            mock_db.execute = AsyncMock(side_effect=[
+                e_states, e_states, e_states, e_states,  # load states
+                e_upsert, e_upsert, e_upsert, e_upsert,  # upsert ratings
+                e_region, e_region, e_region, e_region,  # fetch regions
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+
+        assert len(resp.data.team_a) == 2
+        assert len(resp.data.team_b) == 2
+
+        # B方赢了2局 > A方赢了1局 → B方应加分，A方应减分
+        for r in resp.data.team_a:
+            assert r.delta < 0, f"A方 {r.card_code} 应减分, delta={r.delta}"
+        for r in resp.data.team_b:
+            assert r.delta > 0, f"B方 {r.card_code} 应加分, delta={r.delta}"
+
+        # 每人 rating_after == rating_before + delta
+        for r in resp.data.team_a + resp.data.team_b:
+            assert abs(r.rating_after - (r.rating_before + r.delta)) < 0.01

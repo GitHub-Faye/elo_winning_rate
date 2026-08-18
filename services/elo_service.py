@@ -27,10 +27,11 @@ from core.schemas import (
     PlayerResult,
     RecordData,
 )
-from core.score_parser import parse_item_score
+from core.score_parser import parse_item_score, parse_item_score_games
 from elo_compute import (
     EloConfig,
     EloResult,
+    FactorBreakdown,
     MatchInput,
     SideInput,
     TeamInput,
@@ -58,12 +59,13 @@ class _MatchData:
     event_id: int
     battle_id: int
     source_order: int  # 设为 0
-    score_a: int       # 从 item_score 解析
-    score_b: int       # 从 item_score 解析
+    score_a: int       # 从 item_score 解析（总分，用于记录存储）
+    score_b: int       # 从 item_score 解析（总分，用于记录存储）
     team_a: list[str]  # card_code 列表
     team_b: list[str]  # card_code 列表
     event_weight: float
     played_at: Optional[datetime]
+    games: list[tuple[int, int]]  # 逐局比分 [(a, b), ...]，用于逐局 Elo 计算
 
 
 class EloService:
@@ -79,6 +81,8 @@ class EloService:
         """处理一场比赛，返回 Elo 变化记录。
 
         自动从数据库获取所有比赛信息，只需提供 battle_id。
+        多局比赛逐局独立计算 Elo，取均值作为最终变化。
+        胜负由「谁赢的局更多」决定（非总分）。
         """
         # 1. 从数据库获取比赛完整信息
         match_data = await self._fetch_match_data(req.battle_id, req.event_weight)
@@ -94,26 +98,120 @@ class EloService:
         states_a = await self._load_player_states(match_data.team_a)
         states_b = await self._load_player_states(match_data.team_b)
 
-        s_a, s_b = _scores(match_data.score_a, match_data.score_b)
+        # 4. 逐局 Elo 计算并取均值；同时统计各局胜负以判定总胜负
+        num_games = len(match_data.games)
+        if num_games == 0:
+            raise ValueError(f"比赛无有效局数据: battle_id={match_data.battle_id}")
 
-        if team_size == 1:
-            results_a, results_b = self._run_singles(states_a, states_b, match_data, s_a, s_b)
-        else:
-            results_a, results_b = self._run_doubles(states_a, states_b, match_data, s_a, s_b)
+        # 累加器：各局结果累加
+        acc_delta_a: list[float] = [0.0] * len(states_a)
+        acc_delta_b: list[float] = [0.0] * len(states_b)
+        acc_games_a: list[int] = [0] * len(states_a)
+        acc_games_b: list[int] = [0] * len(states_b)
+        acc_wins_a: list[int] = [0] * len(states_a)
+        acc_wins_b: list[int] = [0] * len(states_b)
+        acc_losses_a: list[int] = [0] * len(states_a)
+        acc_losses_b: list[int] = [0] * len(states_b)
+        acc_results_a: list[float] = [0.0] * len(states_a)
+        acc_results_b: list[float] = [0.0] * len(states_b)
 
-        # 持久化 + 构建响应
+        # 用于 breakdown 的最近一局结果（取最后一局的因子分解）
+        last_results_a: list[EloResult] | None = None
+        last_results_b: list[EloResult] | None = None
+
+        # 统计各局胜负（用于判定总胜负）
+        a_games_won = 0  # A 赢的局数
+        b_games_won = 0  # B 赢的局数
+
+        for game_a, game_b in match_data.games:
+            s_a, s_b = _scores(game_a, game_b)
+
+            # 统计本局胜负
+            if game_a > game_b:
+                a_games_won += 1
+            elif game_b > game_a:
+                b_games_won += 1
+
+            # 构造临时 match_data 用于本局计算
+            game_match = _MatchData(
+                event_id=match_data.event_id,
+                battle_id=match_data.battle_id,
+                source_order=match_data.source_order,
+                score_a=game_a,
+                score_b=game_b,
+                team_a=match_data.team_a,
+                team_b=match_data.team_b,
+                event_weight=match_data.event_weight,
+                played_at=match_data.played_at,
+                games=[(game_a, game_b)],
+            )
+
+            if team_size == 1:
+                results_a, results_b = self._run_singles(states_a, states_b, game_match, s_a, s_b)
+            else:
+                results_a, results_b = self._run_doubles(states_a, states_b, game_match, s_a, s_b)
+
+            # 累加各局结果
+            for i, r in enumerate(results_a):
+                acc_delta_a[i] += r.delta
+                acc_games_a[i] += r.games_after - states_a[i].games
+                acc_wins_a[i] += r.wins_after - states_a[i].wins
+                acc_losses_a[i] += r.losses_after - states_a[i].losses
+                acc_results_a[i] += r.rating_after
+            for i, r in enumerate(results_b):
+                acc_delta_b[i] += r.delta
+                acc_games_b[i] += r.games_after - states_b[i].games
+                acc_wins_b[i] += r.wins_after - states_b[i].wins
+                acc_losses_b[i] += r.losses_after - states_b[i].losses
+                acc_results_b[i] += r.rating_after
+
+            last_results_a = results_a
+            last_results_b = results_b
+
+        # 5. 构造均值结果（仅 Elo delta 取均值，胜负按局数判定）
+        avg_results_a = []
+        for i, state in enumerate(states_a):
+            avg_delta = acc_delta_a[i] / num_games
+            avg_rating = acc_results_a[i] / num_games
+            avg_results_a.append(EloResult(
+                delta=avg_delta,
+                rating_after=avg_rating,
+                games_after=state.games + round(acc_games_a[i] / num_games),
+                wins_after=state.wins + round(acc_wins_a[i] / num_games),
+                losses_after=state.losses + round(acc_losses_a[i] / num_games),
+                breakdown=last_results_a[i].breakdown,
+            ))
+
+        avg_results_b = []
+        for i, state in enumerate(states_b):
+            avg_delta = acc_delta_b[i] / num_games
+            avg_rating = acc_results_b[i] / num_games
+            avg_results_b.append(EloResult(
+                delta=avg_delta,
+                rating_after=avg_rating,
+                games_after=state.games + round(acc_games_b[i] / num_games),
+                wins_after=state.wins + round(acc_wins_b[i] / num_games),
+                losses_after=state.losses + round(acc_losses_b[i] / num_games),
+                breakdown=last_results_b[i].breakdown,
+            ))
+
+        # 6. 判定总胜负（谁赢的局更多 = 胜者）
+        a_is_winner = a_games_won > b_games_won
+        b_is_winner = b_games_won > a_games_won
+
+        # 7. 持久化 + 构建响应（score 使用局数比分，如 2:1）
         played_at = match_data.played_at or datetime.now()
         team_a_results = await self._process_team(
-            states_a, results_a, match_data, "A", s_a > 0.5, team_size,
+            states_a, avg_results_a, match_data, "A", a_is_winner, team_size,
             states_b[0].card_code,
             states_b[1].card_code if team_size == 2 else None,
-            match_data.score_a, match_data.score_b, played_at,
+            a_games_won, b_games_won, played_at,
         )
         team_b_results = await self._process_team(
-            states_b, results_b, match_data, "B", s_b > 0.5, team_size,
+            states_b, avg_results_b, match_data, "B", b_is_winner, team_size,
             states_a[0].card_code,
             states_a[1].card_code if team_size == 2 else None,
-            match_data.score_b, match_data.score_a, played_at,
+            b_games_won, a_games_won, played_at,
         )
 
         await self.db.flush()
@@ -160,10 +258,12 @@ class EloService:
         # 3. 解析 item_score
         if item_score:
             score_a, score_b = parse_item_score(item_score)
+            game_list = parse_item_score_games(item_score)
         else:
             # 回退到 player_one_score/two_score（局数）
             score_a = card_info["score_a"]
             score_b = card_info["score_b"]
+            game_list = [(score_a, score_b)]
 
         # 4. 构造 _MatchData
         return _MatchData(
@@ -176,6 +276,7 @@ class EloService:
             team_b=card_info["team_b"],
             event_weight=event_weight,
             played_at=battle_time,
+            games=game_list,
         )
 
     # ── 从 DB 加载选手状态 ──
