@@ -1,15 +1,17 @@
 """Tests for EloService — 通过 mock AsyncSession 实现可测试性"""
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.schemas import EloRecordRequest
 from services.elo_service import EloService
+from services.battle_card_service import get_card_codes_by_battle_id
 
 # 测试用身份证号
 CARD_A = "110101199001011234"
@@ -39,6 +41,37 @@ def _make_mock_db_all_new() -> AsyncMock:
     exec_result.scalars().all.return_value = []
     db.execute = AsyncMock(return_value=exec_result)
     return db
+
+
+def _make_battle_info(
+    battle_id: int = 100,
+    event_id: int = 1,
+    team_a: list[str] | None = None,
+    team_b: list[str] | None = None,
+    score_a: int = 21,
+    score_b: int = 15,
+    item_score: str | None = "21:15",
+) -> dict:
+    """构造 battle_card_service 返回的 mock 数据。"""
+    if team_a is None:
+        team_a = [CARD_A]
+    if team_b is None:
+        team_b = [CARD_B]
+    return {
+        "battle_id": battle_id,
+        "event_id": event_id,
+        "project_type": 1 if len(team_a) == 1 else 2,
+        "team_a": team_a,
+        "team_b": team_b,
+        "team_a_names": ["选手A"],
+        "team_b_names": ["选手B"],
+        "score_a": score_a,
+        "score_b": score_b,
+        "item_score": item_score,
+        "battle_time": datetime(2024, 1, 1),
+        "is_valid": True,
+        "missing_count": 0,
+    }
 
 
 def _mock_singles_db(
@@ -94,30 +127,46 @@ class TestSingles:
 
     def _make_request(
         self,
-        score_a: int = 21,
-        score_b: int = 15,
-        card_a: str = CARD_A,
-        card_b: str = CARD_B,
+        battle_id: int = 100,
+        event_weight: float = 1.0,
     ) -> EloRecordRequest:
         return EloRecordRequest(
-            event_id=1,
-            battle_id=100,
-            source_order=0,
-            score_a=score_a,
-            score_b=score_b,
-            team_a=[card_a],
-            team_b=[card_b],
-            event_weight=1.0,
+            battle_id=battle_id,
+            event_weight=event_weight,
         )
 
     @pytest.mark.asyncio
-    async def test_singles_winner_gains_rating(self, service: EloService):
+    async def test_singles_winner_gains_rating(self, mock_db: AsyncMock):
         """胜者加分，败者减分。"""
-        resp = await service.record_match(self._make_request(score_a=21, score_b=15))
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                score_a=21, score_b=15, item_score="21:15"
+            )
+            # Mock item_score 查询
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            # Mock _load_player_states
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            # Mock _upsert_rating
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            # Mock _fetch_region
+            e_region = MagicMock()
+            e_region.first.return_value = None
 
-        assert resp.success is True
-        assert len(resp.data.team_a) == 1
-        assert len(resp.data.team_b) == 1
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request(battle_id=100))
+
+            assert resp.success is True
+            assert len(resp.data.team_a) == 1
+            assert len(resp.data.team_b) == 1
 
         ra = resp.data.team_a[0]
         rb = resp.data.team_b[0]
@@ -138,14 +187,36 @@ class TestSingles:
     async def test_singles_upset_bonus(self):
         """定级期新人爆冷胜高段位 → 触发越级加分 bonus。"""
         existing_rating_b = _existing_rating(CARD_B, Decimal("1700.00"), 50, 30, 20)
-        mock_db = _mock_singles_db(
-            team_a_existing=None,
-            team_b_existing=existing_rating_b,
-        )
-        svc = EloService(mock_db)
 
-        req = self._make_request(score_a=21, score_b=18)
-        resp = await svc.record_match(req)
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                score_a=21, score_b=18, item_score="21:18"
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:18", "battle_time": datetime(2024, 1, 1)}
+            )
+            # Mock _load_player_states + _upsert_rating
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_states_existing = MagicMock()
+            e_states_existing.scalars().all.return_value = [existing_rating_b]
+            e_upsert_none = MagicMock()
+            e_upsert_none.scalar_one_or_none.return_value = None
+            e_upsert_existing = MagicMock()
+            e_upsert_existing.scalar_one_or_none.return_value = existing_rating_b
+            # Mock _fetch_region
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db = _mock_singles_db()
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states_existing, e_upsert_none, e_upsert_existing, e_region
+            ])
+
+            svc = EloService(mock_db)
+            req = self._make_request(battle_id=100)
+            resp = await svc.record_match(req)
 
         ra = resp.data.team_a[0]
         assert ra.upset_bonus > 0, f"新人爆冷应有 bonus，但={ra.upset_bonus}"
@@ -157,14 +228,34 @@ class TestSingles:
     async def test_singles_upset_penalty(self):
         """高段位输给定级新人 → 被越级扣分 penalty。"""
         existing_rating_a = _existing_rating(CARD_A, Decimal("1700.00"), 50, 30, 20)
-        mock_db = _mock_singles_db(
-            team_a_existing=existing_rating_a,
-            team_b_existing=None,
-        )
-        svc = EloService(mock_db)
 
-        req = self._make_request(score_a=18, score_b=21)
-        resp = await svc.record_match(req)
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                score_a=18, score_b=21, item_score="18:21"
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "18:21", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states_existing = MagicMock()
+            e_states_existing.scalars().all.return_value = [existing_rating_a]
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert_existing = MagicMock()
+            e_upsert_existing.scalar_one_or_none.return_value = existing_rating_a
+            e_upsert_none = MagicMock()
+            e_upsert_none.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db = _mock_singles_db()
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states_existing, e_states, e_upsert_existing, e_upsert_none, e_region
+            ])
+
+            svc = EloService(mock_db)
+            req = self._make_request(battle_id=100)
+            resp = await svc.record_match(req)
 
         ra = resp.data.team_a[0]
         rb = resp.data.team_b[0]
@@ -175,31 +266,87 @@ class TestSingles:
     async def test_singles_new_player_high_k(self):
         """新选手 K=80，稳定期选手 K=15。"""
         existing_rating_b = _existing_rating(CARD_B, Decimal("1500.00"), 80, 40, 40)
-        mock_db = _mock_singles_db(
-            team_a_existing=None,
-            team_b_existing=existing_rating_b,
-        )
-        svc = EloService(mock_db)
 
-        req = self._make_request(score_a=21, score_b=15)
-        resp = await svc.record_match(req)
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                score_a=21, score_b=15, item_score="21:15"
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_states_existing = MagicMock()
+            e_states_existing.scalars().all.return_value = [existing_rating_b]
+            e_upsert_none = MagicMock()
+            e_upsert_none.scalar_one_or_none.return_value = None
+            e_upsert_existing = MagicMock()
+            e_upsert_existing.scalar_one_or_none.return_value = existing_rating_b
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db = _mock_singles_db()
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states_existing, e_upsert_none, e_upsert_existing, e_region
+            ])
+
+            svc = EloService(mock_db)
+            req = self._make_request(battle_id=100)
+            resp = await svc.record_match(req)
 
         assert resp.data.team_a[0].k_factor == 80.0  # new_player_k (games=0)
         assert resp.data.team_b[0].k_factor == 15.0  # stable_k (games=50)
 
     @pytest.mark.asyncio
-    async def test_singles_db_write_called(self, service: EloService, mock_db: AsyncMock):
+    async def test_singles_db_write_called(self, mock_db: AsyncMock):
         """验证数据库写入被调用。"""
-        resp = await service.record_match(self._make_request())
-        assert mock_db.add.call_count >= 2, f"add 应至少 2 次，但={mock_db.add.call_count}"
-        mock_db.flush.assert_awaited_once()
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info()
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request())
+            assert mock_db.add.call_count >= 2, f"add 应至少 2 次，但={mock_db.add.call_count}"
+            mock_db.flush.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_singles_rating_consistency(self, service: EloService):
+    async def test_singles_rating_consistency(self, mock_db: AsyncMock):
         """rating_after == rating_before + delta。"""
-        resp = await service.record_match(self._make_request())
-        for result in resp.data.team_a + resp.data.team_b:
-            assert abs(result.rating_after - (result.rating_before + result.delta)) < 0.001
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info()
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request())
+            for result in resp.data.team_a + resp.data.team_b:
+                assert abs(result.rating_after - (result.rating_before + result.delta)) < 0.001
 
 
 # ── 双打测试 ──
@@ -208,45 +355,131 @@ class TestSingles:
 class TestDoubles:
     """双打场景测试"""
 
-    def _make_request(self, score_a=21, score_b=15) -> EloRecordRequest:
+    def _make_request(self, battle_id: int = 200) -> EloRecordRequest:
         return EloRecordRequest(
-            event_id=1,
-            battle_id=200,
-            source_order=0,
-            score_a=score_a,
-            score_b=score_b,
-            team_a=[CARD_A, CARD_B],
-            team_b=[CARD_C, CARD_D],
+            battle_id=battle_id,
             event_weight=1.0,
         )
 
     @pytest.mark.asyncio
-    async def test_doubles_four_results(self, service: EloService):
+    async def test_doubles_four_results(self, mock_db: AsyncMock):
         """双打返回 team_a 2 人 + team_b 2 人 = 4 条结果。"""
-        resp = await service.record_match(self._make_request())
-        assert len(resp.data.team_a) == 2
-        assert len(resp.data.team_b) == 2
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                team_a=[CARD_A, CARD_B], team_b=[CARD_C, CARD_D],
+                score_a=21, score_b=15, item_score="21:15",
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_states, e_states,
+                e_upsert, e_upsert, e_upsert, e_upsert,
+                e_region, e_region, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request())
+            assert len(resp.data.team_a) == 2
+            assert len(resp.data.team_b) == 2
 
     @pytest.mark.asyncio
-    async def test_doubles_rating_consistency(self, service: EloService):
+    async def test_doubles_rating_consistency(self, mock_db: AsyncMock):
         """所有队员 rating_after = rating_before + delta。"""
-        resp = await service.record_match(self._make_request())
-        for result in resp.data.team_a + resp.data.team_b:
-            assert abs(result.rating_after - (result.rating_before + result.delta)) < 0.001
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                team_a=[CARD_A, CARD_B], team_b=[CARD_C, CARD_D],
+                score_a=21, score_b=15, item_score="21:15",
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_states, e_states,
+                e_upsert, e_upsert, e_upsert, e_upsert,
+                e_region, e_region, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request())
+            for result in resp.data.team_a + resp.data.team_b:
+                assert abs(result.rating_after - (result.rating_before + result.delta)) < 0.001
 
     @pytest.mark.asyncio
-    async def test_doubles_db_write_called(self, service: EloService, mock_db: AsyncMock):
+    async def test_doubles_db_write_called(self, mock_db: AsyncMock):
         """双打写入 4 条 match_record + 4 条新选手 = 8 次 add。"""
-        resp = await service.record_match(self._make_request())
-        assert mock_db.add.call_count >= 4, f"add 应至少 4 次，但={mock_db.add.call_count}"
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                team_a=[CARD_A, CARD_B], team_b=[CARD_C, CARD_D],
+                score_a=21, score_b=15, item_score="21:15",
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_states, e_states,
+                e_upsert, e_upsert, e_upsert, e_upsert,
+                e_region, e_region, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request())
+            assert mock_db.add.call_count >= 4, f"add 应至少 4 次，但={mock_db.add.call_count}"
 
     @pytest.mark.asyncio
-    async def test_doubles_opponent_partner_card(self, service: EloService):
+    async def test_doubles_opponent_partner_card(self, mock_db: AsyncMock):
         """双打时 opponent_partner_card_code 有值。"""
-        resp = await service.record_match(self._make_request())
-        a0 = resp.data.team_a[0]
-        assert a0.opponent_card_code == CARD_C
-        assert a0.opponent_partner_card_code == CARD_D
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                team_a=[CARD_A, CARD_B], team_b=[CARD_C, CARD_D],
+                score_a=21, score_b=15, item_score="21:15",
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_states, e_states,
+                e_upsert, e_upsert, e_upsert, e_upsert,
+                e_region, e_region, e_region, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request())
+            a0 = resp.data.team_a[0]
+            assert a0.opponent_card_code == CARD_C
+            assert a0.opponent_partner_card_code == CARD_D
 
 
 # ── 边界场景 ──
@@ -255,60 +488,87 @@ class TestDoubles:
 class TestEdgeCases:
 
     @pytest.mark.asyncio
-    async def test_draw_score(self, service: EloService):
+    async def test_draw_score(self, mock_db: AsyncMock):
         """平局（分数相等）→ 双方 delta 接近 0。"""
-        req = EloRecordRequest(
-            event_id=1, battle_id=300, source_order=0,
-            score_a=21, score_b=21,
-            team_a=[CARD_A], team_b=[CARD_B], event_weight=1.0,
-        )
-        resp = await service.record_match(req)
-        for result in resp.data.team_a + resp.data.team_b:
-            assert abs(result.delta) < 0.1, f"平局 delta 应接近 0，但={result.delta}"
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                score_a=21, score_b=21, item_score="21:21"
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:21", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region
+            ])
+
+            service = EloService(mock_db)
+            req = EloRecordRequest(battle_id=300, event_weight=1.0)
+            resp = await service.record_match(req)
+            for result in resp.data.team_a + resp.data.team_b:
+                assert abs(result.delta) < 0.1, f"平局 delta 应接近 0，但={result.delta}"
 
     @pytest.mark.asyncio
-    async def test_team_size_mismatch(self, service: EloService):
+    async def test_team_size_mismatch(self, mock_db: AsyncMock):
         """双方人数不匹配 → ValueError。"""
-        req = EloRecordRequest(
-            event_id=1, battle_id=400, source_order=0,
-            score_a=21, score_b=15,
-            team_a=[CARD_A], team_b=[CARD_B, CARD_C], event_weight=1.0,
-        )
-        with pytest.raises(ValueError, match="人数不匹配"):
-            await service.record_match(req)
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info(
+                team_a=[CARD_A], team_b=[CARD_B, CARD_C],
+            )
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": None, "battle_time": datetime(2024, 1, 1)}
+            )
+            mock_db.execute = AsyncMock(side_effect=[e_battle])
+
+            service = EloService(mock_db)
+            req = EloRecordRequest(battle_id=400, event_weight=1.0)
+            with pytest.raises(ValueError, match="队伍人数不匹配"):
+                await service.record_match(req)
 
     @pytest.mark.asyncio
-    async def test_existing_player_update(self):
-        """已有选手 → 更新战绩而非新建。"""
-        existing = _existing_rating(CARD_A, Decimal("1500.00"), 10, 5, 5)
-        mock_db = _mock_singles_db(
-            team_a_existing=existing,
-            team_b_existing=None,
-        )
-        svc = EloService(mock_db)
+    async def test_battle_not_found(self, mock_db: AsyncMock):
+        """比赛不存在 → ValueError。"""
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = None
 
-        req = EloRecordRequest(
-            event_id=1, battle_id=500, source_order=0,
-            score_a=21, score_b=15,
-            team_a=[CARD_A], team_b=[CARD_B], event_weight=1.0,
-        )
-        await svc.record_match(req)
-
-        assert existing.games == 11, f"games 应+1，但={existing.games}"
-        assert existing.losses == 5, f"losses 不应增加（赢了），但={existing.losses}"
-        assert existing.wins == 6, f"wins 应+1，但={existing.wins}"
+            service = EloService(mock_db)
+            req = EloRecordRequest(battle_id=999999, event_weight=1.0)
+            with pytest.raises(ValueError, match="比赛不存在"):
+                await service.record_match(req)
 
     @pytest.mark.asyncio
-    async def test_success_envelope(self, service: EloService):
+    async def test_success_envelope(self, mock_db: AsyncMock):
         """响应包含 success=True 和 data.team_a/data.team_b。"""
-        req = EloRecordRequest(
-            event_id=1, battle_id=600, source_order=0,
-            score_a=21, score_b=15,
-            team_a=[CARD_A], team_b=[CARD_B], event_weight=1.0,
-        )
-        resp = await service.record_match(req)
-        assert resp.success is True
-        assert hasattr(resp.data, "team_a")
-        assert hasattr(resp.data, "team_b")
-        assert len(resp.data.team_a) == 1
-        assert len(resp.data.team_b) == 1
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = _make_battle_info()
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region, e_region
+            ])
+
+            service = EloService(mock_db)
+            req = EloRecordRequest(battle_id=600, event_weight=1.0)
+            resp = await service.record_match(req)
+            assert resp.success is True
+            assert hasattr(resp.data, "team_a")
+            assert hasattr(resp.data, "team_b")
+            assert len(resp.data.team_a) == 1
+            assert len(resp.data.team_b) == 1

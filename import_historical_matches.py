@@ -193,15 +193,8 @@ WHERE b.status = 2
 class ImportedMatch:
     """一场已解析、待重放的重排比赛。"""
 
-    event_id: int
     battle_id: int
-    source_order: int
-    played_at: datetime | None
-    score_a: int
-    score_b: int
-    match_type: str          # 'singles' / 'doubles'
-    team_a: list[str]        # 身份证号列表（单打 1 个，双打 2 个）
-    team_b: list[str]
+    match_type: str          # 'singles' / 'doubles' — 仅用于统计显示
 
 
 async def extract_importable_matches(
@@ -217,11 +210,9 @@ async def extract_importable_matches(
     返回:
         自然顺序（battle_time 升序，为 NULL 排最后）匹配列表。
     """
-    from services.battle_card_service import get_card_codes_by_battle_id
-
     # Step 1: 获取所有符合条件的 battle_id
     stmt_battles = text("""
-        SELECT battle_id
+        SELECT battle_id, project_type
         FROM motion_event_layout_stage_battle
         WHERE status = 2
           AND is_empty = 0
@@ -230,50 +221,22 @@ async def extract_importable_matches(
         ORDER BY battle_time
     """)
     if limit:
-        stmt_battles = text(f"SELECT battle_id FROM ({stmt_battles}) t LIMIT :limit")
+        stmt_battles = text(f"SELECT * FROM ({stmt_battles}) t LIMIT :limit")
 
     result = await session.execute(stmt_battles, {"limit": limit} if limit else {})
-    battle_ids = [row[0] for row in result.fetchall()]
+    rows = result.fetchall()
 
-    # Step 2: 逐个 battle 获取身份证号
     matches = []
-    skipped_dup = 0
-    for battle_id in battle_ids:
-        card_info = await get_card_codes_by_battle_id(session, battle_id)
-        if card_info and card_info["is_valid"]:
-            # 检查是否有重复的 card_code
-            all_codes = card_info["team_a"] + card_info["team_b"]
-            if len(set(all_codes)) != len(all_codes):
-                skipped_dup += 1
-                continue
+    for row in rows:
+        battle_id = row[0]
+        project_type = row[1]
+        match_type = "singles" if project_type == 1 else "doubles"
+        matches.append(ImportedMatch(
+            battle_id=battle_id,
+            match_type=match_type,
+        ))
 
-            # 确定比赛类型
-            if len(card_info["team_a"]) == 1:
-                match_type = "singles"
-            else:
-                match_type = "doubles"
-
-            matches.append(ImportedMatch(
-                event_id=card_info["event_id"],
-                battle_id=card_info["battle_id"],
-                source_order=0,
-                played_at=card_info["battle_time"],
-                score_a=card_info["score_a"],
-                score_b=card_info["score_b"],
-                match_type=match_type,
-                team_a=card_info["team_a"],
-                team_b=card_info["team_b"],
-            ))
-
-    if skipped_dup:
-        print(f"  [INFO] 跳过 {skipped_dup} 场参赛选手 card_code 有重复的对阵"
-              f"（同一身份证被多 user_setting_id 登记）", file=sys.stderr)
     return matches
-
-
-def _is_valid_card(code: str) -> bool:
-    """校验身份证号：18 位，前 17 位纯数字，末位数字或 X。"""
-    return bool(re.fullmatch(r"[0-9]{17}[0-9Xx]", code))
 
 
 # ──────────────────────────────────────────────
@@ -318,15 +281,8 @@ async def replay_matches(
     for i, m in enumerate(matches, 1):
         try:
             req = EloRecordRequest(
-                event_id=m.event_id,
                 battle_id=m.battle_id,
-                source_order=m.source_order,
-                score_a=m.score_a,
-                score_b=m.score_b,
-                team_a=m.team_a,
-                team_b=m.team_b,
                 event_weight=1.0,
-                played_at=m.played_at,
             )
             await service.record_match(req)
             played += 1
@@ -336,15 +292,14 @@ async def replay_matches(
                 doubles += 1
             if pretty:
                 print(_render_progress(i), flush=True)
-                print(f"  ✓ {m.match_type} event#{m.event_id} "
-                      f"battle#{m.battle_id}  {m.score_a}-{m.score_b}", flush=True)
+                print(f"  ✓ {m.match_type} battle#{m.battle_id}", flush=True)
             else:
                 print(_render_progress(i), end="", flush=True)
         except Exception as e:   # noqa: BLE001 —— 单场失败不阻断整体重放
-            errors.append(f"event#{m.event_id}/battle#{m.battle_id}: {e}")
+            errors.append(f"battle#{m.battle_id}: {e}")
             # 失败时不刷新进度条序号行，另起一行打印错误，避免与进度条粘连
             print("", flush=True)
-            print(f"  [ERR] event#{m.event_id}/battle#{m.battle_id}: {e}", file=sys.stderr, flush=True)
+            print(f"  [ERR] battle#{m.battle_id}: {e}", file=sys.stderr, flush=True)
             # 该场事务已回滚，session 进入 failed 状态，需显式 reset 才能继续下一场
             try:
                 await session.rollback()

@@ -14,51 +14,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class EloRecordRequest(BaseModel):
-    """Elo 记录请求体"""
-    event_id: int = Field(
-        ...,
-        description="赛事 ID。用于标识这场比赛隶属于哪场赛事，并写入比赛记录。",
-    )
+    """Elo 记录请求体 - 简化版，只需 battle_id"""
     battle_id: int = Field(
         ...,
-        description="对阵 ID。标识该赛事内的一场具体对阵（两队之间的一场比赛），与 event_id 共同构成比赛记录的唯一性。",
-    )
-    source_order: int = Field(
-        0,
-        description="赛事内场序号。该对阵在赛事场次中的排序位置，仅用于展示/追溯，不参与 Elo 计算。",
-    )
-    score_a: int = Field(
-        ..., ge=0,
-        description="A 方（第一队）本场比赛得分。用于分差倍率 M_margin 计算与胜负判定（A>B 则 A 胜）。",
-    )
-    score_b: int = Field(
-        ..., ge=0,
-        description="B 方（第二队）本场比赛得分。用于分差倍率 M_margin 计算与胜负判定（B>A 则 B 胜）。",
-    )
-    team_a: list[str] = Field(
-        ..., min_length=1, max_length=2,
-        description="A 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。选手以身份证号定位，未注册用户同样适用。",
-    )
-    team_b: list[str] = Field(
-        ..., min_length=1, max_length=2,
-        description="B 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。双方人数必须一致。",
+        description="对阵 ID。所有比赛信息（选手、比分、赛事等）将自动从数据库获取。",
     )
     event_weight: float = Field(
         1.0, gt=0,
-        description="赛事权重（须大于 0）。作为赛事权重倍率 M_weight 的一部分参与 Elo 计算，如热身赛/正式赛可设不同权重。",
+        description="赛事权重（须大于 0）。作为赛事权重倍率 M_weight 的一部分参与 Elo 计算。",
     )
-    played_at: Optional[datetime] = Field(
-        None,
-        description="比赛时间。缺省时使用服务器当前时间。",
-    )
-
-    @field_validator("score_a", "score_b")
-    @classmethod
-    def _check_score_non_negative(cls, v: int) -> int:
-        """比分必须非负。"""
-        if v < 0:
-            raise ValueError("比分不能为负数")
-        return v
 
     @field_validator("event_weight")
     @classmethod

@@ -32,7 +32,7 @@ async def get_card_codes_by_battle_id(
             player_one_user_ids, player_two_user_ids,
             player_one_name, player_two_name,
             player_one_score, player_two_score,
-            battle_time
+            battle_time, item_score
         FROM motion_event_layout_stage_battle
         WHERE battle_id = :battle_id AND is_del = 0
     """)
@@ -73,6 +73,7 @@ async def get_card_codes_by_battle_id(
         "team_b_names": names_b,
         "score_a": battle["player_one_score"],
         "score_b": battle["player_two_score"],
+        "item_score": battle.get("item_score"),
         "battle_time": battle["battle_time"],
         "is_valid": missing_count == 0,
         "missing_count": missing_count,

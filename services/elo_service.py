@@ -1,7 +1,7 @@
 """Elo 服务层 — 处理比赛结果记录和 Elo 计算
 
 核心职责：
-  1. 接收比赛结果（比分、选手 ID 列表）
+  1. 接收 battle_id，自动从数据库获取所有比赛信息
   2. 查询 DB 获取选手当前 Elo 分（新选手用默认值）
   3. 自动判断单打/双打，调用 elo_compute.py
   4. 写入 elo_match_record
@@ -27,6 +27,7 @@ from core.schemas import (
     PlayerResult,
     RecordData,
 )
+from core.score_parser import parse_item_score
 from elo_compute import (
     EloConfig,
     EloResult,
@@ -51,6 +52,20 @@ class _PlayerState:
     losses: int
 
 
+@dataclass
+class _MatchData:
+    """从数据库查询到的比赛完整数据（内部使用）"""
+    event_id: int
+    battle_id: int
+    source_order: int  # 设为 0
+    score_a: int       # 从 item_score 解析
+    score_b: int       # 从 item_score 解析
+    team_a: list[str]  # card_code 列表
+    team_b: list[str]  # card_code 列表
+    event_weight: float
+    played_at: Optional[datetime]
+
+
 class EloService:
     """Elo 服务，通过 AsyncSession 注入实现可测试性。"""
 
@@ -63,40 +78,42 @@ class EloService:
     async def record_match(self, req: EloRecordRequest) -> EloRecordResponse:
         """处理一场比赛，返回 Elo 变化记录。
 
-        自动判断单打/双打：
-        - len(team)=1 → 单打，调用 compute_match_pair()
-        - len(team)=2 → 双打，调用 compute_team_match()
+        自动从数据库获取所有比赛信息，只需提供 battle_id。
         """
-        team_size = len(req.team_a)
-        if team_size != len(req.team_b):
-            raise ValueError("双方人数不匹配")
-        if team_size not in (1, 2):
-            raise ValueError(f"不支持的队伍人数: {team_size}")
+        # 1. 从数据库获取比赛完整信息
+        match_data = await self._fetch_match_data(req.battle_id, req.event_weight)
 
-        # 查询 DB 获取双方选手当前状态
-        states_a = await self._load_player_states(req.team_a)
-        states_b = await self._load_player_states(req.team_b)
+        # 2. 人数校验
+        team_size = len(match_data.team_a)
+        if team_size != len(match_data.team_b) or team_size not in (1, 2):
+            raise ValueError(
+                f"队伍人数不匹配或无效: A={len(match_data.team_a)}, B={len(match_data.team_b)}"
+            )
 
-        s_a, s_b = _scores(req.score_a, req.score_b)
+        # 3. 查询 DB 获取双方选手当前状态
+        states_a = await self._load_player_states(match_data.team_a)
+        states_b = await self._load_player_states(match_data.team_b)
+
+        s_a, s_b = _scores(match_data.score_a, match_data.score_b)
 
         if team_size == 1:
-            results_a, results_b = self._run_singles(states_a, states_b, req, s_a, s_b)
+            results_a, results_b = self._run_singles(states_a, states_b, match_data, s_a, s_b)
         else:
-            results_a, results_b = self._run_doubles(states_a, states_b, req, s_a, s_b)
+            results_a, results_b = self._run_doubles(states_a, states_b, match_data, s_a, s_b)
 
         # 持久化 + 构建响应
-        played_at = req.played_at or datetime.now()
+        played_at = match_data.played_at or datetime.now()
         team_a_results = await self._process_team(
-            states_a, results_a, req, "A", s_a > 0.5, team_size,
+            states_a, results_a, match_data, "A", s_a > 0.5, team_size,
             states_b[0].card_code,
             states_b[1].card_code if team_size == 2 else None,
-            req.score_a, req.score_b, played_at,
+            match_data.score_a, match_data.score_b, played_at,
         )
         team_b_results = await self._process_team(
-            states_b, results_b, req, "B", s_b > 0.5, team_size,
+            states_b, results_b, match_data, "B", s_b > 0.5, team_size,
             states_a[0].card_code,
             states_a[1].card_code if team_size == 2 else None,
-            req.score_b, req.score_a, played_at,
+            match_data.score_b, match_data.score_a, played_at,
         )
 
         await self.db.flush()
@@ -105,6 +122,60 @@ class EloService:
         return EloRecordResponse(
             success=True,
             data=RecordData(team_a=team_a_results, team_b=team_b_results),
+        )
+
+    async def _fetch_match_data(
+        self,
+        battle_id: int,
+        event_weight: float = 1.0,
+    ) -> _MatchData:
+        """从数据库获取比赛完整信息。"""
+        from services.battle_card_service import get_card_codes_by_battle_id
+
+        # 1. 获取选手信息
+        card_info = await get_card_codes_by_battle_id(self.db, battle_id)
+        if not card_info:
+            raise ValueError(f"比赛不存在: battle_id={battle_id}")
+        if not card_info["is_valid"]:
+            raise ValueError(
+                f"比赛选手信息不完整: battle_id={battle_id}, "
+                f"missing_count={card_info['missing_count']}"
+            )
+
+        # 2. 获取 item_score
+        stmt = text("""
+            SELECT item_score, battle_time
+            FROM motion_event_layout_stage_battle
+            WHERE battle_id = :battle_id AND is_del = 0
+        """)
+        result = await self.db.execute(stmt, {"battle_id": battle_id})
+        row = result.fetchone()
+        if not row:
+            raise ValueError(f"比赛不存在: battle_id={battle_id}")
+
+        row = dict(row._mapping)
+        item_score = row.get("item_score")
+        battle_time = row.get("battle_time")
+
+        # 3. 解析 item_score
+        if item_score:
+            score_a, score_b = parse_item_score(item_score)
+        else:
+            # 回退到 player_one_score/two_score（局数）
+            score_a = card_info["score_a"]
+            score_b = card_info["score_b"]
+
+        # 4. 构造 _MatchData
+        return _MatchData(
+            event_id=card_info["event_id"],
+            battle_id=battle_id,
+            source_order=0,
+            score_a=score_a,
+            score_b=score_b,
+            team_a=card_info["team_a"],
+            team_b=card_info["team_b"],
+            event_weight=event_weight,
+            played_at=battle_time,
         )
 
     # ── 从 DB 加载选手状态 ──
@@ -151,7 +222,7 @@ class EloService:
 
     def _run_singles(
         self, states_a: list[_PlayerState], states_b: list[_PlayerState],
-        req: EloRecordRequest, s_a: float, s_b: float,
+        match_data: _MatchData, s_a: float, s_b: float,
     ) -> tuple[list[EloResult], list[EloResult]]:
         """执行单打 Elo 计算，返回 (results_a, results_b)。"""
         s_a_side = SideInput(
@@ -163,7 +234,7 @@ class EloService:
             actual_score=s_b, wins=states_b[0].wins, losses=states_b[0].losses,
         )
         match = MatchInput(
-            score_a=req.score_a, score_b=req.score_b, event_weight=req.event_weight,
+            score_a=match_data.score_a, score_b=match_data.score_b, event_weight=match_data.event_weight,
         )
         r_a, r_b = compute_match_pair(s_a_side, s_b_side, match, self.config)
         return [r_a], [r_b]
@@ -172,7 +243,7 @@ class EloService:
 
     def _run_doubles(
         self, states_a: list[_PlayerState], states_b: list[_PlayerState],
-        req: EloRecordRequest, s_a: float, s_b: float,
+        match_data: _MatchData, s_a: float, s_b: float,
     ) -> tuple[list[EloResult], list[EloResult]]:
         """执行双打 Elo 计算，返回 (results_a, results_b)。"""
         team_a = TeamInput(players=tuple(
@@ -186,7 +257,7 @@ class EloService:
             for st in states_b
         ))
         match = MatchInput(
-            score_a=req.score_a, score_b=req.score_b, event_weight=req.event_weight,
+            score_a=match_data.score_a, score_b=match_data.score_b, event_weight=match_data.event_weight,
         )
         return compute_team_match(team_a, team_b, match, self.config)
 
@@ -196,7 +267,7 @@ class EloService:
         self,
         states: list[_PlayerState],
         results: list[EloResult],
-        req: EloRecordRequest,
+        match_data: _MatchData,
         team_side: str,
         is_winner: bool,
         team_size: int,
@@ -209,7 +280,7 @@ class EloService:
         """对一方的所有队员：写 record + 更新 rating + 构建响应。"""
         player_results = []
         for state, result in zip(states, results):
-            self._save_record(req, state.card_code, result, team_side,
+            self._save_record(match_data, state.card_code, result, team_side,
                               team_size, is_winner,
                               opponent_card_code, opponent_partner_card_code,
                               score_self, score_opponent, played_at)
@@ -224,7 +295,7 @@ class EloService:
 
     def _save_record(
         self,
-        req: EloRecordRequest,
+        match_data: _MatchData,
         card_code: str,
         result: EloResult,
         team_side: str,
@@ -241,9 +312,9 @@ class EloService:
         bd = result.breakdown
 
         record = EloMatchRecord(
-            event_id=req.event_id,
-            battle_id=req.battle_id,
-            source_order=req.source_order,
+            event_id=match_data.event_id,
+            battle_id=match_data.battle_id,
+            source_order=match_data.source_order,
             card_code=card_code,
             team_side=team_side,
             team_size=team_size,
