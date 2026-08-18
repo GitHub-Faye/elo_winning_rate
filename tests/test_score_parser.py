@@ -65,10 +65,10 @@ class TestParseItemScore:
         with pytest.raises(ValueError, match="比分不能为负数"):
             parse_item_score("-1:21")
 
-    def test_score_too_high(self):
-        """测试比分超出范围"""
-        with pytest.raises(ValueError, match="比分超出合理范围"):
-            parse_item_score("32:21")
+    def test_high_score(self):
+        """测试高比分（不限上限）"""
+        assert parse_item_score("35:21") == (35, 21)
+        assert parse_item_score("50:60") == (50, 60)
 
     def test_total_zero(self):
         """测试总分为 0"""
@@ -132,10 +132,10 @@ class TestParseItemScoreGames:
         with pytest.raises(ValueError, match="比分不能为负数"):
             parse_item_score_games("-1:21")
 
-    def test_score_too_high(self):
-        """比分超范围抛出 ValueError"""
-        with pytest.raises(ValueError, match="比分超出合理范围"):
-            parse_item_score_games("32:21")
+    def test_high_score(self):
+        """高比分不限上限"""
+        assert parse_item_score_games("35:11") == [(35, 11)]
+        assert parse_item_score_games("50:60") == [(50, 60)]
 
     def test_empty_games_string(self):
         """有效格式但无局数据"""

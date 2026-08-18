@@ -87,8 +87,10 @@ class EloService:
         # 1. 从数据库获取比赛完整信息
         match_data = await self._fetch_match_data(req.battle_id, req.event_weight)
 
-        # 2. 人数校验
+        # 2. 人数校验（基于过滤后的有效选手）
         team_size = len(match_data.team_a)
+        if team_size == 0 or len(match_data.team_b) == 0:
+            raise ValueError(f"比赛无有效选手: battle_id={match_data.battle_id}")
         if team_size != len(match_data.team_b) or team_size not in (1, 2):
             raise ValueError(
                 f"队伍人数不匹配或无效: A={len(match_data.team_a)}, B={len(match_data.team_b)}"
@@ -234,11 +236,10 @@ class EloService:
         card_info = await get_card_codes_by_battle_id(self.db, battle_id)
         if not card_info:
             raise ValueError(f"比赛不存在: battle_id={battle_id}")
-        if not card_info["is_valid"]:
-            raise ValueError(
-                f"比赛选手信息不完整: battle_id={battle_id}, "
-                f"missing_count={card_info['missing_count']}"
-            )
+
+        # 过滤空 card_code，只保留有效身份证号的选手
+        card_info["team_a"] = [c for c in card_info["team_a"] if c and len(c) == 18]
+        card_info["team_b"] = [c for c in card_info["team_b"] if c and len(c) == 18]
 
         # 2. 获取 item_score
         stmt = text("""

@@ -14,25 +14,19 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 
-# 羽毛球单局最高分（正常 21 分，加分上限 30 分）
-MAX_GAME_SCORE = 31
-
-
 def parse_item_score(
     item_score: Optional[str],
-    strict: bool = True,
 ) -> Tuple[Optional[int], Optional[int]]:
     """解析 item_score 字符串，返回 (score_a, score_b) 总分。
 
     Args:
         item_score: 比分字符串，格式为 "A:B" 或 "A:B|A:B|..."
-        strict: 是否严格校验比分范围（0-MAX_GAME_SCORE）
 
     Returns:
         (score_a, score_b) 总分，或 (None, None) 如果输入为空
 
     Raises:
-        ValueError: 格式异常或比分超出合理范围
+        ValueError: 格式异常或比分为负数
     """
     if item_score is None or (isinstance(item_score, str) and not item_score.strip()):
         return None, None
@@ -66,12 +60,6 @@ def parse_item_score(
         if a < 0 or b < 0:
             raise ValueError(f"比分不能为负数: '{game}'")
 
-        # 严格模式下验证比分范围
-        if strict and (a > MAX_GAME_SCORE or b > MAX_GAME_SCORE):
-            raise ValueError(
-                f"比分超出合理范围 (0-{MAX_GAME_SCORE}): '{game}'"
-            )
-
         total_a += a
         total_b += b
 
@@ -84,7 +72,6 @@ def parse_item_score(
 
 def parse_item_score_games(
     item_score: Optional[str],
-    strict: bool = True,
 ) -> Optional[list[tuple[int, int]]]:
     """解析 item_score 字符串，返回逐局比分列表。
 
@@ -93,19 +80,18 @@ def parse_item_score_games(
 
     Args:
         item_score: 比分字符串，格式为 "A:B" 或 "A:B|A:B|..."
-        strict: 是否严格校验比分范围（0-MAX_GAME_SCORE）
 
     Returns:
         [(game_a, game_b), ...] 逐局比分列表，或 None 如果输入为空
 
     Raises:
-        ValueError: 格式异常或比分超出合理范围
+        ValueError: 格式异常或比分为负数
 
     示例:
         >>> parse_item_score_games("21:11|21:14")
         [(21, 11), (21, 14)]
-        >>> parse_item_score_games("21:11|18:21|12:21")
-        [(21, 11), (18, 21), (12, 21)]
+        >>> parse_item_score_games("35:11")
+        [(35, 11)]
     """
     if item_score is None or (isinstance(item_score, str) and not item_score.strip()):
         return None
@@ -137,12 +123,6 @@ def parse_item_score_games(
         # 验证比分非负
         if a < 0 or b < 0:
             raise ValueError(f"比分不能为负数: '{game}'")
-
-        # 严格模式下验证比分范围
-        if strict and (a > MAX_GAME_SCORE or b > MAX_GAME_SCORE):
-            raise ValueError(
-                f"比分超出合理范围 (0-{MAX_GAME_SCORE}): '{game}'"
-            )
 
         games.append((a, b))
 
