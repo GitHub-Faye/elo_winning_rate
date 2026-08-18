@@ -426,8 +426,7 @@ def main():
                     print("  （说明：正式导入会清空 elo_match_record 与 elo_player_rating）")
                 # 预览前 5 场
                 for m in matches[:5]:
-                    print(f"  {m.match_type} event#{m.event_id} battle#{m.battle_id} "
-                          f"{m.score_a}-{m.score_b}  A={m.team_a} B={m.team_b}")
+                    print(f"  {m.match_type} battle#{m.battle_id}")
                 return
 
             if not args.keep:
