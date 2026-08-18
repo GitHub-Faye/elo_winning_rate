@@ -135,7 +135,7 @@ async def test_delete_nonexistent_match():
     db.execute = AsyncMock(return_value=ex)
     db.commit = AsyncMock()
 
-    resp = await delete_match(db, 999, 999)
+    resp = await delete_match(db, 999)
     assert resp.data.deleted is False
     assert resp.data.total_records_deleted == 0
     assert resp.data.players_affected == []
@@ -163,7 +163,7 @@ async def test_delete_singles_both_latest():
     db = _make_db(match_rows, ratings, global_max)
     db.add = MagicMock()
 
-    resp = await delete_match(db, 1, 100)
+    resp = await delete_match(db, 100)
 
     assert resp.data.deleted is True
     assert resp.data.match_type == "singles"
@@ -213,7 +213,7 @@ async def test_delete_doubles_all_latest():
     db = _make_db(match_rows, ratings, global_max)
     db.add = MagicMock()
 
-    resp = await delete_match(db, 1, 100)
+    resp = await delete_match(db, 100)
 
     assert resp.data.match_type == "doubles"
     assert resp.data.total_records_deleted == 4
@@ -251,7 +251,7 @@ async def test_delete_singles_one_not_latest():
     db = _make_db(match_rows, ratings, global_max)
     db.add = MagicMock()
 
-    resp = await delete_match(db, 1, 100)
+    resp = await delete_match(db, 100)
 
     # 记录照删
     assert resp.data.deleted is True
@@ -284,5 +284,5 @@ async def test_delete_commits():
     db = _make_db(match_rows, ratings, global_max)
     db.add = MagicMock()
 
-    await delete_match(db, 1, 100)
+    await delete_match(db, 100)
     db.commit.assert_awaited_once()

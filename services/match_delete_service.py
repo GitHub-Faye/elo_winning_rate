@@ -1,4 +1,4 @@
-"""删除比赛记录服务 — 按 event_id + battle_id 删除一场比赛,并撤回积分(让积分保持一致)
+"""删除比赛记录服务 — 按 battle_id 删除一场比赛,并撤回积分(让积分保持一致)
 
 数据来源:`elo_match_record`(每人每场一条),`elo_player_rating`(各选手当前积分)。
 
@@ -32,7 +32,6 @@ CURRENT_SPORT = "badminton"
 
 async def delete_match(
     db: AsyncSession,
-    event_id: int,
     battle_id: int,
 ) -> DeleteMatchResponse:
     """删除一场比赛(record + 选手最新场积分回滚),返回删除与回滚明细。"""
@@ -40,7 +39,6 @@ async def delete_match(
     result_records = await db.execute(
         select(EloMatchRecord)
         .where(
-            EloMatchRecord.event_id == event_id,
             EloMatchRecord.battle_id == battle_id,
         )
         .order_by(EloMatchRecord.id)
@@ -49,7 +47,7 @@ async def delete_match(
 
     if not match_rows:
         # 比赛不存在:返回 deleted=False,由路由决定是否映射为 404。
-        return _empty_response(event_id, battle_id)
+        return _empty_response(battle_id)
 
     # 判定哪些选手的本场为其个人最新一场(这些人才回滚积分)
     is_latest_map = await _latest_match_flags(db, match_rows)
@@ -72,13 +70,15 @@ async def delete_match(
     # 真正删除该场比赛的全部 record(任何玩家,含非最新场)
     await db.execute(
         delete(EloMatchRecord).where(
-            EloMatchRecord.event_id == event_id,
             EloMatchRecord.battle_id == battle_id,
         )
     )
 
     # 提交一笔事务:积分回滚 + 记录删除一起生效
     await db.commit()
+
+    # 从记录中提取 event_id
+    event_id = match_rows[0].event_id if match_rows else None
 
     notice = (
         "存在未回滚积分的选手:这些选手的该场并非其最新一场,积分保留不动;"
@@ -99,10 +99,10 @@ async def delete_match(
 # ── 内部工具 ──
 
 
-def _empty_response(event_id: int, battle_id: int) -> DeleteMatchResponse:
+def _empty_response(battle_id: int) -> DeleteMatchResponse:
     """比赛不存在时的空响应(deleted=False,由路由决定是否映射为 404)。"""
     data = DeleteMatchData(
-        event_id=event_id,
+        event_id=None,
         battle_id=battle_id,
         match_type="singles",
         deleted=False,

@@ -385,7 +385,7 @@ class DeleteMatchResult(BaseModel):
 
 class DeleteMatchData(BaseModel):
     """删除比赛记录响应数据"""
-    event_id: int = Field(..., description="赛事 ID")
+    event_id: Optional[int] = Field(None, description="赛事 ID（从记录中提取）")
     battle_id: int = Field(..., description="对阵 ID")
     match_type: str = Field(..., description="比赛类型: singles=单打 / doubles=双打")
     deleted: bool = Field(..., description="该场比赛记录是否已删除（比赛存在则为 true）")
@@ -407,7 +407,6 @@ class DeleteMatchResponse(BaseModel):
 class MatchDeleteErrorResponse(BaseModel):
     """比赛不存在 / 无匹配记录的错误响应"""
     detail: str = Field(..., description="错误描述")
-    event_id: Optional[int] = Field(None, description="赛事 ID")
     battle_id: Optional[int] = Field(None, description="对阵 ID")
     code: Optional[str] = Field(None, description="错误码，如 match_not_found")
 
