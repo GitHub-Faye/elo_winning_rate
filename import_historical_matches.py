@@ -19,6 +19,7 @@
 用法:
     python import_historical_matches.py                 # 清空两张表后全量重放
     python import_historical_matches.py --keep          # 不清表，仅重放（用于续跑/补导）
+    python import_historical_matches.py --since 2026-08-21  # 只导入 2026-08-21 起的比赛
     python import_historical_matches.py --limit 200     # 只导先 200 场（试跑）
     python import_historical_matches.py --dry-run       # 只统计可导入场次，不写库
     python import_historical_matches.py --pretty        # 打印明细日志
@@ -83,27 +84,38 @@ class ImportedMatch:
 async def extract_importable_matches(
     session: AsyncSession,
     limit: int | None = None,
+    since: str | None = None,
 ) -> list[ImportedMatch]:
     """从数据库提取所有有效比赛，按 battle_time 升序。
 
     Args:
         session: 只读会话（用于提取）。
         limit: 最大提取场次（None = 全部）。
+        since: 只提取 battle_time >= 此日期的比赛（如 '2026-08-21'）。
 
     返回:
         自然顺序（battle_time 升序，为 NULL 排最后）匹配列表。
     """
-    base_sql = """
+    conditions = [
+        "is_del = 0",
+        "status = 2",
+        "is_empty = 0",
+        "player_one_score != player_two_score",
+        "player_one_score >= 0",
+        "player_two_score >= 0",
+    ]
+    params: dict = {}
+    if since:
+        conditions.append("battle_time >= :since")
+        params["since"] = since
+
+    where_clause = " AND ".join(conditions)
+    base_sql = f"""
         SELECT battle_id, project_type
         FROM motion_event_layout_stage_battle
-        WHERE is_del = 0
-          AND status = 2
-          AND is_empty = 0
-          AND player_one_score != player_two_score
-          AND player_one_score >= 0 AND player_two_score >= 0
+        WHERE {where_clause}
         ORDER BY battle_time
     """
-    params: dict = {}
     if limit:
         base_sql += " LIMIT :limit"
         params["limit"] = limit
@@ -278,6 +290,10 @@ def main():
         help="不清空现有 elo_match_record/elo_player_rating，直接追加重放（默认会清空）",
     )
     parser.add_argument(
+        "--since", "-s", type=str, default=None,
+        help="只导入 battle_time >= 此日期的比赛，如 '2026-08-21'（默认全部）",
+    )
+    parser.add_argument(
         "--limit", "-l", type=int, default=None,
         help="只抽取前 N 场（按 battle_time），用于试跑/断点续导 (默认全部)",
     )
@@ -301,7 +317,7 @@ def main():
     async def _run():
         async with AsyncSessionLocal() as session:
             print("⏳ 正在提取可导入的历史比赛...")
-            matches = await extract_importable_matches(session, args.limit)
+            matches = await extract_importable_matches(session, args.limit, args.since)
             print(f"  提取到 {len(matches)} 场可导入比赛 "
                   f"({sum(1 for m in matches if m.project_type==1)} 单打 / "
                   f"{sum(1 for m in matches if m.project_type==2)} 双打)")
