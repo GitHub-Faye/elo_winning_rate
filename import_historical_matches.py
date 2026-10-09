@@ -1,29 +1,15 @@
 #!/usr/bin/env python
 """把数据库既有历史比赛导入当前 Elo 业务库
 
-数据源: `motion_event_layout_stage_battle`（对阵表）+ `motion_event_apply_user_setting`（报名人表）
+数据源: `motion_event_layout_stage_battle`（对阵表）
 目标:   `elo_match_record`（每人每场一条） + `elo_player_rating`（各选手当前积分）
 
-核心链路: 对阵的对阵人员ID（player_*_user_ids，冗余的一行/多行 user_setting_id）
-  → JOIN `motion_event_apply_user_setting.user_setting_id` 拿 card_code（身份证号）
-  单打一行、双打拆逗号的四行，逐个 JOIN。card_code 全部拿到才导入，缺任一位跳过该场。
+核心链路: battle_id → EloService.record_match() → battle_card_service.get_card_codes_by_battle_id()
+  → 自动处理两条卡牌解析路径：
+    团体赛：player_one_user_ids → apply_user_setting → card_code
+    单体赛：player_one_id → stage_player → apply_id → apply_user_setting → card_code
 
-`user_setting_id` 是什么：
-  它是旧运动平台「报名表」motion_event_apply_user_setting 里，每次「报名事件」的唯一主键，
-  不是人的唯一标识。一个人在一场赛事报名一次 = 一行 user_setting_id；
-  对阵表 motion_event_layout_stage_battle 的 player_*_user_ids 冗余存放该场对阵的
-  user_setting_id（单打 1 个、双打 2 个、逗号拼接）。
-  因此 user_setting_id 是在对阵表与报名表之间精确对齐到身份证号的桥（全局唯一、无重复），
-  不能靠 name（姓名）对齐——同名异人 / 异名同人 / "wangb王兵" 之类脏名字都存在。
-
-一个绕不开的坑：
-  user_setting_id 定位的是一次报名，不是一个 IR人 —— 同一个 card_code 可能登记在多个
-  user_setting_id 下（同人重复报名 / 被录入两次）。这会导致：
-    - 双打里两个 user_setting_id 的 card_code 相同（如田蒲军/魏兴荣都指向同一身份证号）
-      → elo_player_rating 主键冲突；
-    - 跨场续跑时 card_code 撞到已存在的行 → UPDATE 0-matched。
-  因此脚本对每场强制「同一场参赛选手的 card_code 必须互不相同」，SQL 层与 Python 层双重过滤，
-  把两次报名当成两个人导入的脏对阵直接跳过。
+不需要预过滤 card_code 格式——EloService 内部会跳过无效选手。
 
 重放策略:
   - 按 battle_time 升序逐场重放，保证 Elo 积分累计顺序与真实赛程一致。
@@ -33,6 +19,7 @@
 用法:
     python import_historical_matches.py                 # 清空两张表后全量重放
     python import_historical_matches.py --keep          # 不清表，仅重放（用于续跑/补导）
+    python import_historical_matches.py --since 2026-08-21  # 只导入 2026-08-21 起的比赛
     python import_historical_matches.py --limit 200     # 只导先 200 场（试跑）
     python import_historical_matches.py --dry-run       # 只统计可导入场次，不写库
     python import_historical_matches.py --pretty        # 打印明细日志
@@ -44,17 +31,16 @@ import argparse
 import asyncio
 import json
 import logging
-import re
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import DATABASE_URL, AsyncSessionLocal
+from core.database import AsyncSessionLocal
 from core.schemas import EloRecordRequest
 from services.elo_service import EloService
 
@@ -92,136 +78,36 @@ def load_best_config() -> dict:
 # 提取可精确对齐身份证号的比赛
 # ──────────────────────────────────────────────
 
-EXTRACT_SQL = text("""
--- 单打（project_type=1）：player_*_user_ids 各一行，直接 JOIN 拿 card_code
-SELECT
-    b.event_id,
-    b.battle_id,
-    b.event_index        AS source_order,
-    b.battle_time,
-    b.player_one_score   AS score_one,
-    b.player_two_score   AS score_two,
-    'singles'            AS match_type,
-    u1.card_code         AS one_c1,
-    /* 单打: one_c1=A方选手, two_c1=B方选手 */
-    NULL                 AS one_c2,
-    NULL                 AS one_c3,
-    NULL                 AS one_c4,
-    u2.card_code         AS two_c1,
-    NULL                 AS two_c2,
-    NULL                 AS two_c3,
-    NULL                 AS two_c4
-FROM motion_event_layout_stage_battle b
-JOIN motion_event_apply_user_setting u1
-    ON u1.user_setting_id = CAST(b.player_one_user_ids AS UNSIGNED)
-    AND u1.event_id = b.event_id
-    AND u1.card_code REGEXP '^[0-9]{17}[0-9Xx]$'
-JOIN motion_event_apply_user_setting u2
-    ON u2.user_setting_id = CAST(b.player_two_user_ids AS UNSIGNED)
-    AND u2.event_id = b.event_id
-    AND u2.card_code REGEXP '^[0-9]{17}[0-9Xx]$'
-WHERE b.status = 2
-    AND b.is_empty = 0
-    AND b.project_type = 1
-    AND b.player_one_score != b.player_two_score
-    AND b.player_one_score >= 0 AND b.player_two_score >= 0
-    AND b.player_one_user_ids IS NOT NULL AND b.player_one_user_ids != ''
-    AND b.player_two_user_ids IS NOT NULL AND b.player_two_user_ids != ''
-    AND b.player_one_user_ids NOT LIKE '%,%'      -- 单打必须单 user_setting_id
-    AND b.player_two_user_ids NOT LIKE '%,%'
-
-UNION ALL
-
--- 双打（project_type=2）：player_*_user_ids 为"id1,id2"，拆逗号分别 JOIN
-SELECT
-    b.event_id,
-    b.battle_id,
-    b.event_index        AS source_order,
-    b.battle_time,
-    b.player_one_score   AS score_one,
-    b.player_two_score   AS score_two,
-    'doubles'            AS match_type,
-    u1.card_code         AS one_c1,
-    u2.card_code         AS one_c2,
-    NULL                 AS one_c3,
-    NULL                 AS one_c4,
-    b1.card_code         AS two_c1,
-    b2.card_code         AS two_c2,
-    NULL                 AS two_c3,
-    NULL                 AS two_c4
-FROM motion_event_layout_stage_battle b
-JOIN motion_event_apply_user_setting u1
-    ON u1.user_setting_id = CAST(SUBSTRING_INDEX(b.player_one_user_ids, ',', 1) AS UNSIGNED)
-    AND u1.event_id = b.event_id
-    AND u1.card_code REGEXP '^[0-9]{17}[0-9Xx]$'
-JOIN motion_event_apply_user_setting u2
-    ON u2.user_setting_id = CAST(SUBSTRING_INDEX(b.player_one_user_ids, ',', -1) AS UNSIGNED)
-    AND u2.event_id = b.event_id
-    AND u2.card_code REGEXP '^[0-9]{17}[0-9Xx]$'
-JOIN motion_event_apply_user_setting b1
-    ON b1.user_setting_id = CAST(SUBSTRING_INDEX(b.player_two_user_ids, ',', 1) AS UNSIGNED)
-    AND b1.event_id = b.event_id
-    AND b1.card_code REGEXP '^[0-9]{17}[0-9Xx]$'
-JOIN motion_event_apply_user_setting b2
-    ON b2.user_setting_id = CAST(SUBSTRING_INDEX(b.player_two_user_ids, ',', -1) AS UNSIGNED)
-    AND b2.event_id = b.event_id
-    AND b2.card_code REGEXP '^[0-9]{17}[0-9Xx]$'
-WHERE b.status = 2
-    AND b.is_empty = 0
-    AND b.project_type = 2
-    AND b.player_one_score != b.player_two_score
-    AND b.player_one_score >= 0 AND b.player_two_score >= 0
-    AND b.player_one_user_ids IS NOT NULL AND b.player_one_user_ids != ''
-    AND b.player_two_user_ids IS NOT NULL AND b.player_two_user_ids != ''
-    AND (b.player_one_user_ids LIKE '%,%' OR b.player_one_user_ids LIKE '%,')  -- 双打须双 id
-    AND (b.player_two_user_ids LIKE '%,%' OR b.player_two_user_ids LIKE '%,')
-    /* 同一方两名 user_setting_id 必须不同（否则 SUBSTRING_INDEX 两个位置返回同一 id，
-       JOIN 到同一 card_code，导致 elo_player_rating 主键冲突 / Elo 积分错乱）。 */
-    AND CAST(SUBSTRING_INDEX(b.player_one_user_ids, ',', 1) AS UNSIGNED)
-      < CAST(SUBSTRING_INDEX(b.player_one_user_ids, ',', -1) AS UNSIGNED)
-    AND CAST(SUBSTRING_INDEX(b.player_two_user_ids, ',', 1) AS UNSIGNED)
-      < CAST(SUBSTRING_INDEX(b.player_two_user_ids, ',', -1) AS UNSIGNED)
-    /* 同一方两名用户ID必须不同（SUBSTRING_INDEX 前/后不同 id 才可能不同 card_code）。 */
-    AND CAST(SUBSTRING_INDEX(b.player_one_user_ids, ',', 1) AS UNSIGNED)
-      != CAST(SUBSTRING_INDEX(b.player_one_user_ids, ',', -1) AS UNSIGNED)
-    AND CAST(SUBSTRING_INDEX(b.player_two_user_ids, ',', 1) AS UNSIGNED)
-      != CAST(SUBSTRING_INDEX(b.player_two_user_ids, ',', -1) AS UNSIGNED)
-    /* 全部 4 个 card_code 必须互不相同（否则同一人不同 user_setting_id 登记了相同身份证号，
-       导致 elo_player_rating 主键冲突 / Elo 积分错乱）。 */
-    AND u1.card_code != u2.card_code
-    AND b1.card_code != b2.card_code
-    AND u1.card_code != b1.card_code AND u1.card_code != b2.card_code
-    AND u2.card_code != b1.card_code AND u2.card_code != b2.card_code
-""")
-
 
 @dataclass
 class ImportedMatch:
     """一场已解析、待重放的重排比赛。"""
 
     battle_id: int
-    match_type: str          # 'singles' / 'doubles' — 仅用于统计显示
+    project_type: int  # 1=singles, 2=doubles
 
 
 async def extract_importable_matches(
     session: AsyncSession,
     limit: int | None = None,
+    since: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[ImportedMatch]:
-    """从数据库提取可精确对齐身份证号的比赛，按 battle_time 升序。
+    """从数据库提取所有有效比赛，按 battle_time 升序。
 
     Args:
         session: 只读会话（用于提取）。
         limit: 最大提取场次（None = 全部）。
+        since: 只提取 battle_time >= 此日期的比赛（如 '2026-08-21'）。
         start: 起始时间（含），按 battle_time 过滤（None = 不限）。
         end: 结束时间（不含），按 battle_time 过滤（None = 不限）。
 
     返回:
         自然顺序（battle_time 升序，为 NULL 排最后）匹配列表。
     """
-    # 基础过滤条件（status/有效性/比分合法性）
     conditions = [
+        "is_del = 0",
         "status = 2",
         "is_empty = 0",
         "player_one_score != player_two_score",
@@ -229,6 +115,9 @@ async def extract_importable_matches(
         "player_two_score >= 0",
     ]
     params: dict = {}
+    if since:
+        conditions.append("battle_time >= :since")
+        params["since"] = since
     if start is not None:
         conditions.append("battle_time >= :start")
         params["start"] = start
@@ -237,16 +126,17 @@ async def extract_importable_matches(
         params["end"] = end
 
     where_clause = " AND ".join(conditions)
-    stmt_battles = text(
-        "SELECT battle_id, project_type "
-        "FROM motion_event_layout_stage_battle "
-        f"WHERE {where_clause} "
-        "ORDER BY battle_time"
-    )
+    base_sql = f"""
+        SELECT battle_id, project_type
+        FROM motion_event_layout_stage_battle
+        WHERE {where_clause}
+        ORDER BY battle_time
+    """
     if limit:
-        stmt_battles = text(f"SELECT * FROM ({stmt_battles}) t LIMIT :limit")
+        base_sql += " LIMIT :limit"
         params["limit"] = limit
 
+    stmt_battles = text(base_sql)
     result = await session.execute(stmt_battles, params)
     rows = result.fetchall()
 
@@ -254,10 +144,9 @@ async def extract_importable_matches(
     for row in rows:
         battle_id = row[0]
         project_type = row[1]
-        match_type = "singles" if project_type == 1 else "doubles"
         matches.append(ImportedMatch(
             battle_id=battle_id,
-            match_type=match_type,
+            project_type=project_type,
         ))
 
     return matches
@@ -310,13 +199,13 @@ async def replay_matches(
             )
             await service.record_match(req)
             played += 1
-            if m.match_type == "singles":
+            if m.project_type == 1:
                 singles += 1
             else:
                 doubles += 1
             if pretty:
                 print(_render_progress(i), flush=True)
-                print(f"  ✓ {m.match_type} battle#{m.battle_id}", flush=True)
+                print(f"  ✓ battle#{m.battle_id}", flush=True)
             else:
                 print(_render_progress(i), end="", flush=True)
         except Exception as e:   # noqa: BLE001 —— 单场失败不阻断整体重放
@@ -417,11 +306,15 @@ def _arg_date(s: str) -> datetime:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="把数据库既有历史比赛导入当前 Elo 业务库（user_setting_id→card_code 精确对齐，按时间重放）",
+        description="把数据库既有历史比赛导入当前 Elo 业务库（battle_card_service 统一卡牌解析，按时间重放）",
     )
     parser.add_argument(
         "--keep", action="store_true",
         help="不清空现有 elo_match_record/elo_player_rating，直接追加重放（默认会清空）",
+    )
+    parser.add_argument(
+        "--since", "-s", type=str, default=None,
+        help="只导入 battle_time >= 此日期的比赛，如 '2026-08-21'（默认全部）",
     )
     parser.add_argument(
         "--limit", "-l", type=int, default=None,
@@ -460,11 +353,11 @@ def main():
 
     async def _run():
         async with AsyncSessionLocal() as session:
-            print("⏳ 正在提取可精确对齐身份证号的历史比赛...")
-            matches = await extract_importable_matches(session, args.limit, args.start, args.end)
+            print("⏳ 正在提取可导入的历史比赛...")
+            matches = await extract_importable_matches(session, args.limit, args.since, args.start, args.end)
             print(f"  提取到 {len(matches)} 场可导入比赛 "
-                  f"({sum(1 for m in matches if m.match_type=='singles')} 单打 / "
-                  f"{sum(1 for m in matches if m.match_type=='doubles')} 双打)")
+                  f"({sum(1 for m in matches if m.project_type==1)} 单打 / "
+                  f"{sum(1 for m in matches if m.project_type==2)} 双打)")
 
             if args.dry_run:
                 print("\n[dry-run] 仅统计，未写库。")
@@ -472,7 +365,7 @@ def main():
                     print("  （说明：正式导入会清空 elo_match_record 与 elo_player_rating）")
                 # 预览前 5 场
                 for m in matches[:5]:
-                    print(f"  {m.match_type} battle#{m.battle_id}")
+                    print(f"  battle#{m.battle_id} (project_type={m.project_type})")
                 return
 
             if not args.keep:

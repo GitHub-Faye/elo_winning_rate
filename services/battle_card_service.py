@@ -280,6 +280,8 @@ async def get_battles_by_card_code(
     event_id = user_row["event_id"]
 
     # Step 2: 查询该选手参加的所有 battle
+    # 使用 FIND_IN_SET 精确匹配逗号分隔的 user_setting_id 列表，
+    # 避免 LIKE '%12%' 误匹配 '123' 的子串问题
     stmt_battles = text("""
         SELECT DISTINCT
             b.battle_id,
@@ -299,19 +301,18 @@ async def get_battles_by_card_code(
             ON p2.id = b.player_two_id AND p2.event_id = b.event_id
         WHERE b.is_del = 0
           AND (
-              -- 团体赛路径：直接匹配 user_setting_id
-              b.player_one_user_ids LIKE :like_one
-              OR b.player_two_user_ids LIKE :like_two
+              -- 团体赛路径：直接匹配 battle 表的 user_ids 字段
+              FIND_IN_SET(:uid, b.player_one_user_ids) > 0
+              OR FIND_IN_SET(:uid, b.player_two_user_ids) > 0
               -- 单体赛路径：通过 stage_player 的 player_user_ids 匹配
-              OR p1.player_user_ids LIKE :like_one
-              OR p2.player_user_ids LIKE :like_two
+              OR FIND_IN_SET(:uid, p1.player_user_ids) > 0
+              OR FIND_IN_SET(:uid, p2.player_user_ids) > 0
           )
         ORDER BY b.battle_time DESC
         LIMIT :limit
     """)
     result = await db.execute(stmt_battles, {
-        "like_one": f"%{user_setting_id}%",
-        "like_two": f"%{user_setting_id}%",
+        "uid": user_setting_id,
         "limit": limit,
     })
     battles = result.fetchall()
