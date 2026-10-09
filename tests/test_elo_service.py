@@ -128,11 +128,11 @@ class TestSingles:
     def _make_request(
         self,
         battle_id: int = 100,
-        event_weight: float = 1.0,
+        event_id: int = 1,
     ) -> EloRecordRequest:
         return EloRecordRequest(
+            event_id=event_id,
             battle_id=battle_id,
-            event_weight=event_weight,
         )
 
     @pytest.mark.asyncio
@@ -357,8 +357,8 @@ class TestDoubles:
 
     def _make_request(self, battle_id: int = 200) -> EloRecordRequest:
         return EloRecordRequest(
+            event_id=1,
             battle_id=battle_id,
-            event_weight=1.0,
         )
 
     @pytest.mark.asyncio
@@ -510,7 +510,7 @@ class TestEdgeCases:
             ])
 
             service = EloService(mock_db)
-            req = EloRecordRequest(battle_id=300, event_weight=1.0)
+            req = EloRecordRequest(event_id=1, battle_id=300)
             resp = await service.record_match(req)
             for result in resp.data.team_a + resp.data.team_b:
                 assert abs(result.delta) < 0.1, f"平局 delta 应接近 0，但={result.delta}"
@@ -529,7 +529,7 @@ class TestEdgeCases:
             mock_db.execute = AsyncMock(side_effect=[e_battle])
 
             service = EloService(mock_db)
-            req = EloRecordRequest(battle_id=400, event_weight=1.0)
+            req = EloRecordRequest(event_id=1, battle_id=400)
             with pytest.raises(ValueError, match="队伍人数不匹配"):
                 await service.record_match(req)
 
@@ -540,7 +540,7 @@ class TestEdgeCases:
             mock_get_cards.return_value = None
 
             service = EloService(mock_db)
-            req = EloRecordRequest(battle_id=999999, event_weight=1.0)
+            req = EloRecordRequest(event_id=1, battle_id=999999)
             with pytest.raises(ValueError, match="比赛不存在"):
                 await service.record_match(req)
 
@@ -565,7 +565,7 @@ class TestEdgeCases:
             ])
 
             service = EloService(mock_db)
-            req = EloRecordRequest(battle_id=600, event_weight=1.0)
+            req = EloRecordRequest(event_id=1, battle_id=600)
             resp = await service.record_match(req)
             assert resp.success is True
             assert hasattr(resp.data, "team_a")
@@ -665,7 +665,7 @@ class TestMultiGameEloAverage:
             ])
 
             service = EloService(mock_db)
-            req = EloRecordRequest(battle_id=500, event_weight=1.0)
+            req = EloRecordRequest(event_id=1, battle_id=500)
             resp = await service.record_match(req)
 
         ra = resp.data.team_a[0]
@@ -705,7 +705,7 @@ class TestMultiGameEloAverage:
             ])
 
             service = EloService(mock_db)
-            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+            resp = await service.record_match(EloRecordRequest(event_id=1, battle_id=500))
 
         # B 赢了 2 局 > A 赢了 1 局 → B 胜，A 负
         ra = resp.data.team_a[0]
@@ -739,7 +739,7 @@ class TestMultiGameEloAverage:
             ])
 
             service = EloService(mock_db)
-            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+            resp = await service.record_match(EloRecordRequest(event_id=1, battle_id=500))
 
         # A 赢了 2 局 > B 赢了 1 局 → A 胜（尽管 A 总分更低）
         ra = resp.data.team_a[0]
@@ -769,7 +769,7 @@ class TestMultiGameEloAverage:
             ])
 
             service = EloService(mock_db)
-            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+            resp = await service.record_match(EloRecordRequest(event_id=1, battle_id=500))
 
         ra = resp.data.team_a[0]
         rb = resp.data.team_b[0]
@@ -813,7 +813,7 @@ class TestMultiGameEloAverage:
             ])
 
             service = EloService(mock_db)
-            resp = await service.record_match(EloRecordRequest(battle_id=500, event_weight=1.0))
+            resp = await service.record_match(EloRecordRequest(event_id=1, battle_id=500))
 
         assert len(resp.data.team_a) == 2
         assert len(resp.data.team_b) == 2

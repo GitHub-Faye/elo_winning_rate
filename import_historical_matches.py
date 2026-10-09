@@ -36,6 +36,7 @@
     python import_historical_matches.py --limit 200     # 只导先 200 场（试跑）
     python import_historical_matches.py --dry-run       # 只统计可导入场次，不写库
     python import_historical_matches.py --pretty        # 打印明细日志
+    python import_historical_matches.py --start 2026-08-25 --end 2026-09-18   # 只导指定日期区间（含两端）
 """
 from __future__ import annotations
 
@@ -47,19 +48,24 @@ import re
 import sys
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# 压掉 SQLAlchemy 的 INFO 回显（core.database 的 engine 设了 echo=True，
-# 全量重放时逐条 SQL 会穿插在进度条里干扰显示）。仅对本脚本生效，不影响其它模块。
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-
 from core.database import DATABASE_URL, AsyncSessionLocal
 from core.schemas import EloRecordRequest
 from services.elo_service import EloService
+
+# 压掉 SQLAlchemy 的 INFO 回显（core.database 的 engine 设了 echo=True）。
+# SQLAlchemy 2.x 的 echo=True 会绕过 logger.setLevel()（内部 EchoLogger 直接把级别
+# 定为 INFO），所以只能把 engine.echo 关成 False，让日志回落到 WARNING。
+_engine = AsyncSessionLocal.kw["bind"]
+_engine.echo = False
+_engine.sync_engine.echo_pool = False
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 
 ROOT = Path(__file__).parent
 
@@ -200,30 +206,48 @@ class ImportedMatch:
 async def extract_importable_matches(
     session: AsyncSession,
     limit: int | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[ImportedMatch]:
     """从数据库提取可精确对齐身份证号的比赛，按 battle_time 升序。
 
     Args:
         session: 只读会话（用于提取）。
         limit: 最大提取场次（None = 全部）。
+        start: 起始时间（含），按 battle_time 过滤（None = 不限）。
+        end: 结束时间（不含），按 battle_time 过滤（None = 不限）。
 
     返回:
         自然顺序（battle_time 升序，为 NULL 排最后）匹配列表。
     """
-    # Step 1: 获取所有符合条件的 battle_id
-    stmt_battles = text("""
-        SELECT battle_id, project_type
-        FROM motion_event_layout_stage_battle
-        WHERE status = 2
-          AND is_empty = 0
-          AND player_one_score != player_two_score
-          AND player_one_score >= 0 AND player_two_score >= 0
-        ORDER BY battle_time
-    """)
+    # 基础过滤条件（status/有效性/比分合法性）
+    conditions = [
+        "status = 2",
+        "is_empty = 0",
+        "player_one_score != player_two_score",
+        "player_one_score >= 0",
+        "player_two_score >= 0",
+    ]
+    params: dict = {}
+    if start is not None:
+        conditions.append("battle_time >= :start")
+        params["start"] = start
+    if end is not None:
+        conditions.append("battle_time < :end")
+        params["end"] = end
+
+    where_clause = " AND ".join(conditions)
+    stmt_battles = text(
+        "SELECT battle_id, project_type "
+        "FROM motion_event_layout_stage_battle "
+        f"WHERE {where_clause} "
+        "ORDER BY battle_time"
+    )
     if limit:
         stmt_battles = text(f"SELECT * FROM ({stmt_battles}) t LIMIT :limit")
+        params["limit"] = limit
 
-    result = await session.execute(stmt_battles, {"limit": limit} if limit else {})
+    result = await session.execute(stmt_battles, params)
     rows = result.fetchall()
 
     matches = []
@@ -281,8 +305,8 @@ async def replay_matches(
     for i, m in enumerate(matches, 1):
         try:
             req = EloRecordRequest(
+                event_id=0,
                 battle_id=m.battle_id,
-                event_weight=1.0,
             )
             await service.record_match(req)
             played += 1
@@ -383,6 +407,14 @@ async def print_summary(session: AsyncSession, matched: int) -> None:
 # ──────────────────────────────────────────────
 
 
+def _arg_date(s: str) -> datetime:
+    """argparse 日期解析：要求 YYYY-MM-DD。"""
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"日期格式应为 YYYY-MM-DD（收到: {s!r}）")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="把数据库既有历史比赛导入当前 Elo 业务库（user_setting_id→card_code 精确对齐，按时间重放）",
@@ -404,10 +436,24 @@ def main():
         help="最佳 Elo 参数 JSON 路径（默认 best_config.json）",
     )
     parser.add_argument(
+        "--start", type=_arg_date, default=None,
+        help="起始日期（含），格式 YYYY-MM-DD，按 battle_time 过滤（默认不限）",
+    )
+    parser.add_argument(
+        "--end", type=_arg_date, default=None,
+        help="结束日期（含），格式 YYYY-MM-DD，按 battle_time 过滤（默认不限）",
+    )
+    parser.add_argument(
         "--pretty", "-v", action="store_true",
         help="逐场打印重放明细",
     )
     args = parser.parse_args()
+
+    # 结束日期按闭区间处理：转成下一日零点作为排他上界
+    if args.end:
+        args.end = args.end + timedelta(days=1)
+    if args.start and args.end and args.start >= args.end:
+        parser.error("--end 必须晚于 --start")
 
     # 读 best_config（用于重放前确认，实际注入在 replay_matches）
     config = load_best_config()
@@ -415,7 +461,7 @@ def main():
     async def _run():
         async with AsyncSessionLocal() as session:
             print("⏳ 正在提取可精确对齐身份证号的历史比赛...")
-            matches = await extract_importable_matches(session, args.limit)
+            matches = await extract_importable_matches(session, args.limit, args.start, args.end)
             print(f"  提取到 {len(matches)} 场可导入比赛 "
                   f"({sum(1 for m in matches if m.match_type=='singles')} 单打 / "
                   f"{sum(1 for m in matches if m.match_type=='doubles')} 双打)")

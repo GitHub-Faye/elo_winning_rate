@@ -80,12 +80,12 @@ class EloService:
     async def record_match(self, req: EloRecordRequest) -> EloRecordResponse:
         """处理一场比赛，返回 Elo 变化记录。
 
-        自动从数据库获取所有比赛信息，只需提供 battle_id。
+        自动从数据库获取所有比赛信息，只需提供 event_id + battle_id（event_id 仅占位，不参与计算）。
         多局比赛逐局独立计算 Elo，取均值作为最终变化。
         胜负由「谁赢的局更多」决定（非总分）。
         """
         # 1. 从数据库获取比赛完整信息
-        match_data = await self._fetch_match_data(req.battle_id, req.event_weight)
+        match_data = await self._fetch_match_data(req.battle_id)
 
         # 2. 人数校验（基于过滤后的有效选手）
         team_size = len(match_data.team_a)

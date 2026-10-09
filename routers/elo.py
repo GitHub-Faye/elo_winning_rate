@@ -16,14 +16,14 @@ router = APIRouter(prefix="/api/v1/elo", tags=["elo"])
     "/record",
     response_model=EloRecordResponse,
     responses={
-        400: {"model": ErrorResponse, "description": "请求参数错误（如人数不匹配、比分非法）"},
+        400: {"model": ErrorResponse, "description": "业务校验失败（如比赛不存在、人数不匹配、无有效局数据）"},
         422: {"model": ErrorResponse},
     },
     summary="记录一场比赛并计算 Elo 变化",
-    description="""接收比赛结果，自动判断单打/双打：
+    description="""接收 `event_id` + `battle_id`，根据 battle_id 从数据库获取对阵信息：
 
-- `team_a`/`team_b` 各 1 人 = 单打
-- `team_a`/`team_b` 各 2 人 = 双打
+- `event_id` 仅作占位字段配合前端，不参与 Elo 计算
+- 单打/双打由数据库中的选手人数自动判定
 
 选手以身份证号（card_code）定位，未注册用户同样适用。
 查询 DB 获取选手当前 Elo 分（新选手用默认值 1500），

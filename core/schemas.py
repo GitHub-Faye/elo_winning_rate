@@ -7,30 +7,22 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── 请求模型 ──
 
 
 class EloRecordRequest(BaseModel):
-    """Elo 记录请求体 - 简化版，只需 battle_id"""
+    """Elo 记录请求体 - 简化版，只需 event_id + battle_id"""
+    event_id: int = Field(
+        ...,
+        description="赛事 ID。仅作占位字段配合前端，不参与 Elo 计算逻辑。",
+    )
     battle_id: int = Field(
         ...,
         description="对阵 ID。所有比赛信息（选手、比分、赛事等）将自动从数据库获取。",
     )
-    event_weight: float = Field(
-        1.0, gt=0,
-        description="赛事权重（须大于 0）。作为赛事权重倍率 M_weight 的一部分参与 Elo 计算。",
-    )
-
-    @field_validator("event_weight")
-    @classmethod
-    def _check_weight_positive(cls, v: float) -> float:
-        """赛事权重必须大于 0。"""
-        if v <= 0:
-            raise ValueError("赛事权重必须大于 0")
-        return v
 
 
 # ── 响应模型 ──
