@@ -30,7 +30,7 @@ class EloRecordRequest(BaseModel):
 
 class PlayerResult(BaseModel):
     """单名选手的 Elo 变化结果（含因子分解）"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     delta: float = Field(..., description="本次 Elo 最终变化量（正=加分，负=减分）")
     rating_after: float = Field(..., description="更新后的 Elo 分")
     games_after: int = Field(..., description="更新后的总场次")
@@ -46,9 +46,9 @@ class PlayerResult(BaseModel):
     clamped_delta: float = Field(..., description="封顶后的普通变化（限制在 ±delta_cap 内）")
     upset_bonus: float = Field(..., description="越级加分：新秀选手爆冷击败高分对手时的额外加分")
     upset_penalty: float = Field(..., description="被越级扣分：输给爆冷获胜的新秀时被扣的分数")
-    opponent_card_code: str = Field(..., description="对手选手身份证号")
+    opponent_card_code: str = Field(..., description="对手选手统一定位键（身份证号优先，否则手机号）")
     opponent_partner_card_code: Optional[str] = Field(
-        None, description="对手搭档身份证号（双打时有值，单打为 null）",
+        None, description="对手搭档统一定位键（双打时有值，单打为 null）",
     )
 
 
@@ -75,11 +75,11 @@ class PredictionRequest(BaseModel):
     """胜率预测请求体"""
     team_a: list[str] = Field(
         ..., min_length=1, max_length=2,
-        description="A 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。",
+        description="A 方选手定位键（身份证或手机号）列表。1 个 = 单打，2 个 = 双打。",
     )
     team_b: list[str] = Field(
         ..., min_length=1, max_length=2,
-        description="B 方选手身份证号（card_code）列表。1 个 = 单打，2 个 = 双打。双方人数必须一致。",
+        description="B 方选手定位键（身份证或手机号）列表。1 个 = 单打，2 个 = 双打。双方人数必须一致。",
     )
 
     @model_validator(mode="after")
@@ -96,7 +96,7 @@ class PredictionRequest(BaseModel):
 
 class PlayerPredictionResult(BaseModel):
     """单名选手的胜率预测结果"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     rating: float = Field(..., description="选手当前 Elo 分")
     games: int = Field(..., description="选手总场次")
     wins: int = Field(..., description="选手胜场")
@@ -141,14 +141,14 @@ class HeadToHeadRecord(BaseModel):
     team_size: int = Field(..., description="比赛形式：1=单打 2=双打")
     score_a: int = Field(..., description="选手 A 视角得分")
     score_b: int = Field(..., description="选手 B 视角得分")
-    winner_card: str = Field(..., description="获胜方选手身份证号")
+    winner_card: str = Field(..., description="获胜方选手统一定位键（身份证号优先，否则手机号）")
     played_at: Optional[datetime] = Field(None, description="比赛时间")
 
 
 class HeadToHeadData(BaseModel):
     """交手记录汇总"""
-    player_a_card: str = Field(..., description="选手 A 身份证号")
-    player_b_card: str = Field(..., description="选手 B 身份证号")
+    player_a_card: str = Field(..., description="选手 A 统一定位键（身份证号优先，否则手机号）")
+    player_b_card: str = Field(..., description="选手 B 统一定位键（身份证号优先，否则手机号）")
     total_matches: int = Field(..., description="两人交手的总场次（含单打和双打）")
     a_wins: int = Field(..., description="选手 A 获胜场次")
     b_wins: int = Field(..., description="选手 B 获胜场次")
@@ -165,10 +165,10 @@ class HeadToHeadResponse(BaseModel):
 
 
 class RatingQueryRequest(BaseModel):
-    """按身份证号批量查询积分请求体"""
+    """按统一定位键（身份证或手机号）批量查询积分请求体"""
     card_codes: list[str] = Field(
         ..., min_length=1, max_length=50,
-        description="选手身份证号（card_code）列表。服务端自动去重，最多 50 个。",
+        description="选手统一定位键（身份证或手机号）列表。服务端自动去重，最多 50 个。",
     )
     sport_type: Optional[str] = Field(
         None, description="运动品类（默认 badminton）",
@@ -182,7 +182,7 @@ class RatingQueryRequest(BaseModel):
 
     @model_validator(mode="after")
     def _dedupe_card_codes(self) -> RatingQueryRequest:
-        """去除重复身份证号（同一选手只查一次）。"""
+        """去除重复统一定位键（同一选手只查一次）。"""
         seen: set[str] = set()
         deduped: list[str] = []
         for code in self.card_codes:
@@ -195,7 +195,7 @@ class RatingQueryRequest(BaseModel):
 
 class PlayerRatingResult(BaseModel):
     """单名选手的积分查询结果"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     rating: Optional[float] = Field(None, description="当前 Elo 分（未建档选手为 null）")
     games: Optional[int] = Field(None, description="总比赛场次")
     wins: Optional[int] = Field(None, description="胜场")
@@ -274,7 +274,7 @@ class RadarMatchDetail(BaseModel):
 class RadarProfile(BaseModel):
     """单名选手的六维雷达图"""
     name: Optional[str] = Field(None, description="选手姓名")
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     matches: int = Field(..., description="参与计算的单打场次（即本次统计的最近 N 场）")
     total_singles: int = Field(..., description="历史全部单打场次")
     offense: float = Field(0, description="进攻得分（发球权得分率归一化，0-100）")
@@ -314,10 +314,10 @@ class PlayerRecord(BaseModel):
     delta: float = Field(..., description="Elo 变化量（正=加分，负=减分）")
     # 对手信息
     opponent_card_code: Optional[str] = Field(
-        None, description="对手身份证号（双打时为第一个对手）",
+        None, description="对手统一定位键（双打时为第一个对手）",
     )
     opponent_partner_card_code: Optional[str] = Field(
-        None, description="对手搭档身份证号（双打时有值，单打为 null）",
+        None, description="对手搭档统一定位键（双打时有值，单打为 null）",
     )
     played_at: Optional[datetime] = Field(None, description="比赛时间")
 
@@ -337,7 +337,7 @@ class PlayerRecordSummary(BaseModel):
 
 class PlayerRecordsData(BaseModel):
     """个人比赛记录响应数据"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     summary: PlayerRecordSummary = Field(..., description="汇总统计")
     records: list[PlayerRecord] = Field(..., description="逐场比赛明细（按时间倒序）")
 
@@ -353,7 +353,7 @@ class PlayerRecordsResponse(BaseModel):
 
 class RollbackResult(BaseModel):
     """单名选手的回滚结果"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     is_latest_match: bool = Field(
         ..., description="该场是否为该选手的最新一场（仅最新一场才回滚积分）",
     )
@@ -368,7 +368,7 @@ class RollbackResult(BaseModel):
 
 class DeleteMatchResult(BaseModel):
     """单名选手的删除/回滚结果"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     removed: bool = Field(..., description="本名选手的该场比赛记录是否被删除")
     rollback: Optional[RollbackResult] = Field(
         None, description="积分回滚结果（若该场为该选手最新一场则回滚）",
@@ -408,7 +408,7 @@ class MatchDeleteErrorResponse(BaseModel):
 
 class MatchPlayerResult(BaseModel):
     """单名选手在本场比赛中的基础变化"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     team_side: str = Field(..., description="所在方 A / B")
     is_winner: bool = Field(..., description="本场是否获胜")
     rating_before: float = Field(..., description="赛前 Elo")
@@ -426,7 +426,7 @@ class MatchPlayerResult(BaseModel):
 
 class MatchAnalysis(BaseModel):
     """指定选手的详细分析（含排名变化和段位差分）"""
-    card_code: str = Field(..., description="选手身份证号")
+    card_code: str = Field(..., description="选手统一定位键（身份证号优先，否则手机号）")
     delta: float = Field(..., description="Elo 变化量")
     rating_before: float = Field(..., description="赛前 Elo")
     rating_after: float = Field(..., description="赛后 Elo")

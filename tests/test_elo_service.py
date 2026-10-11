@@ -65,6 +65,10 @@ def _make_battle_info(
         "team_b": team_b,
         "team_a_names": ["选手A"],
         "team_b_names": ["选手B"],
+        "team_a_cards": team_a,  # 默认全是身份证（无 phone-only 用例时）
+        "team_b_cards": team_b,
+        "team_a_phones": [None] * len(team_a),
+        "team_b_phones": [None] * len(team_b),
         "score_a": score_a,
         "score_b": score_b,
         "item_score": item_score,
@@ -113,7 +117,7 @@ def _mock_singles_db(
 def _existing_rating(card_code: str, rating: Decimal, games: int, wins: int, losses: int):
     """构造一条已存在的 EloPlayerRating（SimpleNamespace）。"""
     return SimpleNamespace(
-        card_code=card_code, sport_type="badminton",
+        player_key=card_code, card_code=card_code, phone=None, sport_type="badminton",
         rating=rating, games=games, wins=wins, losses=losses,
         draws=0, highest_rating=Decimal("1800.00"), lowest_rating=Decimal("1500.00"),
     )
@@ -347,6 +351,138 @@ class TestSingles:
             resp = await service.record_match(self._make_request())
             for result in resp.data.team_a + resp.data.team_b:
                 assert abs(result.rating_after - (result.rating_before + result.delta)) < 0.001
+
+
+    @pytest.mark.asyncio
+    async def test_phone_only_player_recorded(self, mock_db: AsyncMock):
+        """只有手机号的选手也按手机号入档，PlayerResult.card_code 返回手机号。"""
+        phone_a = "13800138000"
+        battle_info = _make_battle_info()
+        battle_info["team_a"] = [phone_a]
+        battle_info["team_a_cards"] = [None]
+        battle_info["team_a_phones"] = [phone_a]
+
+        with patch("services.battle_card_service.get_card_codes_by_battle_id") as mock_get_cards:
+            mock_get_cards.return_value = battle_info
+            e_battle = MagicMock()
+            e_battle.fetchone.return_value = SimpleNamespace(
+                _mapping={"item_score": "21:15", "battle_time": datetime(2024, 1, 1)}
+            )
+            e_states = MagicMock()
+            e_states.scalars().all.return_value = []
+            e_upsert = MagicMock()
+            e_upsert.scalar_one_or_none.return_value = None
+            e_region = MagicMock()
+            e_region.first.return_value = None
+
+            # execute 顺序：battle, loadA, loadB, upsertA(无 region), upsertB, regionB
+            mock_db.execute = AsyncMock(side_effect=[
+                e_battle, e_states, e_states, e_upsert, e_upsert, e_region,
+            ])
+
+            service = EloService(mock_db)
+            resp = await service.record_match(self._make_request(battle_id=100))
+
+        assert resp.success is True
+        assert resp.data.team_a[0].card_code == phone_a  # 统一键 = 手机号
+        assert resp.data.team_b[0].card_code == CARD_B
+        # 手机号选手 card_code 为空，不触发 _fetch_region（仅 B 方身份证选手触发 1 次）
+        assert mock_db.execute.call_count == 6
+
+
+# ── 身份反查复用（防 Elo 分裂）测试 ──
+
+
+class TestIdentityReuse:
+    """第一层：跨身份反查复用已有 player_key，避免后补身份证导致 Elo 分裂。"""
+
+    def _rating_row(self, player_key, card_code, phone, rating="1550.00",
+                    games=10, wins=6, losses=4):
+        return SimpleNamespace(
+            player_key=player_key, card_code=card_code, phone=phone,
+            sport_type="badminton", rating=Decimal(rating), games=games,
+            wins=wins, losses=losses, draws=0,
+            highest_rating=Decimal("1600.00"), lowest_rating=Decimal("1500.00"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_load_player_states_reuses_phone_when_id_added(self):
+        """手机号老身份 + 新记录(身份证+手机号) → 复用手机号 player_key，回填身份证。"""
+        phone = "13800138000"
+        card = "110101199001011234"
+        existing = self._rating_row(player_key=phone, card_code=None, phone=phone)
+
+        db = AsyncMock(spec=AsyncSession)
+        e = MagicMock()
+        e.scalars().all.return_value = [existing]
+        db.execute = AsyncMock(return_value=e)
+        svc = EloService(db)
+
+        # 当次解析 key=身份证（身份证优先），但手机号反查命中旧身份
+        states = await svc._load_player_states([(card, card, phone)])
+
+        assert len(states) == 1
+        s = states[0]
+        assert s.player_key == phone, "应沿用手机号旧身份，不重开身份证身份"
+        assert s.card_code == card, "应回填身份证参考字段"
+        assert s.phone == phone
+        assert s.rating == 1550.0
+        assert s.games == 10
+
+    @pytest.mark.asyncio
+    async def test_load_player_states_prefers_id_when_both_exist(self):
+        """身份证身份与手机号身份并存 → 优先身份证。"""
+        phone = "13800138000"
+        card = "110101199001011234"
+        id_row = self._rating_row(player_key=card, card_code=card, phone=None,
+                                  rating="1600.00", games=20, wins=12, losses=8)
+        phone_row = self._rating_row(player_key=phone, card_code=None, phone=phone,
+                                     rating="1500.00", games=5, wins=3, losses=2)
+
+        db = AsyncMock(spec=AsyncSession)
+        e = MagicMock()
+        e.scalars().all.return_value = [id_row, phone_row]
+        db.execute = AsyncMock(return_value=e)
+        svc = EloService(db)
+
+        states = await svc._load_player_states([(card, card, phone)])
+        assert states[0].player_key == card
+
+    @pytest.mark.asyncio
+    async def test_load_player_states_new_player_default(self):
+        """无任何已有身份 → 默认 1500 新选手。"""
+        db = AsyncMock(spec=AsyncSession)
+        e = MagicMock()
+        e.scalars().all.return_value = []
+        db.execute = AsyncMock(return_value=e)
+        svc = EloService(db)
+        states = await svc._load_player_states([("110101199001011234", "110101199001011234", None)])
+        assert states[0].rating == 1500.0
+        assert states[0].games == 0
+        assert states[0].player_key == "110101199001011234"
+
+    @pytest.mark.asyncio
+    async def test_upsert_rating_backfills_card_code(self):
+        """复用旧身份时把新增身份证回填到 rating 行。"""
+        from services.elo_service import _PlayerState
+
+        phone = "13800138000"
+        card = "110101199001011234"
+        existing = self._rating_row(player_key=phone, card_code=None, phone=phone)
+
+        db = AsyncMock(spec=AsyncSession)
+        e_upsert = MagicMock()
+        e_upsert.scalar_one_or_none.return_value = existing
+        db.execute = AsyncMock(return_value=e_upsert)
+        svc = EloService(db)
+
+        player = _PlayerState(phone, card, phone, 1550.0, 10, 6, 4)
+        result = SimpleNamespace(wins_after=7, losses_after=4, rating_after=1555.0, games_after=11)
+
+        await svc._upsert_rating(player, result)
+
+        assert existing.card_code == card, "应把新增身份证回填到 rating 行"
+        assert existing.games == 11
 
 
 # ── 双打测试 ──
@@ -602,6 +738,10 @@ class TestMultiGameEloAverage:
             "team_b": team_b,
             "team_a_names": ["选手A"],
             "team_b_names": ["选手B"],
+            "team_a_cards": team_a,
+            "team_b_cards": team_b,
+            "team_a_phones": [None] * len(team_a),
+            "team_b_phones": [None] * len(team_b),
             "score_a": total_a,
             "score_b": total_b,
             "item_score": item_score,

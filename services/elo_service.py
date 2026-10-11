@@ -16,11 +16,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from core.models import EloMatchRecord, EloPlayerRating
+from services.battle_card_service import is_valid_id, is_valid_phone
 from core.schemas import (
     EloRecordRequest,
     EloRecordResponse,
@@ -46,7 +47,9 @@ CURRENT_SPORT = "badminton"
 @dataclass
 class _PlayerState:
     """选手的赛前状态（来自 DB 或默认值）"""
-    card_code: str
+    player_key: str
+    card_code: Optional[str]
+    phone: Optional[str]
     rating: float
     games: int
     wins: int
@@ -61,8 +64,12 @@ class _MatchData:
     source_order: int  # 设为 0
     score_a: int       # 从 item_score 解析（总分，用于记录存储）
     score_b: int       # 从 item_score 解析（总分，用于记录存储）
-    team_a: list[str]  # card_code 列表
-    team_b: list[str]  # card_code 列表
+    team_a: list[str]  # 统一定位键列表
+    team_b: list[str]  # 统一定位键列表
+    team_a_cards: list[Optional[str]]  # 与 team_a 对齐的原始身份证
+    team_b_cards: list[Optional[str]]
+    team_a_phones: list[Optional[str]]  # 与 team_a 对齐的原始手机号
+    team_b_phones: list[Optional[str]]
     event_weight: float
     played_at: Optional[datetime]
     games: list[tuple[int, int]]  # 逐局比分 [(a, b), ...]，用于逐局 Elo 计算
@@ -97,8 +104,12 @@ class EloService:
             )
 
         # 3. 查询 DB 获取双方选手当前状态
-        states_a = await self._load_player_states(match_data.team_a)
-        states_b = await self._load_player_states(match_data.team_b)
+        states_a = await self._load_player_states(
+            list(zip(match_data.team_a, match_data.team_a_cards, match_data.team_a_phones))
+        )
+        states_b = await self._load_player_states(
+            list(zip(match_data.team_b, match_data.team_b_cards, match_data.team_b_phones))
+        )
 
         # 4. 逐局 Elo 计算并取均值；同时统计各局胜负以判定总胜负
         num_games = len(match_data.games)
@@ -143,6 +154,10 @@ class EloService:
                 score_b=game_b,
                 team_a=match_data.team_a,
                 team_b=match_data.team_b,
+                team_a_cards=match_data.team_a_cards,
+                team_b_cards=match_data.team_b_cards,
+                team_a_phones=match_data.team_a_phones,
+                team_b_phones=match_data.team_b_phones,
                 event_weight=match_data.event_weight,
                 played_at=match_data.played_at,
                 games=[(game_a, game_b)],
@@ -205,14 +220,14 @@ class EloService:
         played_at = match_data.played_at or datetime.now()
         team_a_results = await self._process_team(
             states_a, avg_results_a, match_data, "A", a_is_winner, team_size,
-            states_b[0].card_code,
-            states_b[1].card_code if team_size == 2 else None,
+            states_b[0].player_key,
+            states_b[1].player_key if team_size == 2 else None,
             a_games_won, b_games_won, played_at,
         )
         team_b_results = await self._process_team(
             states_b, avg_results_b, match_data, "B", b_is_winner, team_size,
-            states_a[0].card_code,
-            states_a[1].card_code if team_size == 2 else None,
+            states_a[0].player_key,
+            states_a[1].player_key if team_size == 2 else None,
             b_games_won, a_games_won, played_at,
         )
 
@@ -237,9 +252,7 @@ class EloService:
         if not card_info:
             raise ValueError(f"比赛不存在: battle_id={battle_id}")
 
-        # 过滤空 card_code，只保留有效身份证号的选手
-        card_info["team_a"] = [c for c in card_info["team_a"] if c and len(c) == 18]
-        card_info["team_b"] = [c for c in card_info["team_b"] if c and len(c) == 18]
+        # 选手统一定位键已在 battle_card_service 解析好（身份证优先，否则手机号），无需再过滤
 
         # 2. 获取 item_score
         stmt = text("""
@@ -275,6 +288,10 @@ class EloService:
             score_b=score_b,
             team_a=card_info["team_a"],
             team_b=card_info["team_b"],
+            team_a_cards=card_info["team_a_cards"],
+            team_b_cards=card_info["team_b_cards"],
+            team_a_phones=card_info["team_a_phones"],
+            team_b_phones=card_info["team_b_phones"],
             event_weight=event_weight,
             played_at=battle_time,
             games=game_list,
@@ -282,30 +299,76 @@ class EloService:
 
     # ── 从 DB 加载选手状态 ──
 
-    async def _load_player_states(self, card_codes: list[str]) -> list[_PlayerState]:
-        """批量查询 DB 获取选手当前 Elo 分，不存在的选手使用默认值。"""
+    async def _load_player_states(
+        self, players: list[tuple[str, Optional[str], Optional[str]]],
+    ) -> list[_PlayerState]:
+        """批量加载选手赛前状态，支持跨身份反查复用（防 Elo 分裂）。
+
+        对每名选手按优先级反查已有身份并复用其 `player_key`：
+        `player_key` 精确命中 → 身份证 → 手机号；未命中则用默认值（新选手 1500）。
+
+        典型场景：手机号选手后补身份证——新记录里身份证+手机号并存，身份证反查
+        落空、手机号命中旧身份，从而沿用旧 `player_key`，不重开一条身份证身份。
+        """
+        # 归一化 raw 标识：strip + 空串 → None（key 已由 resolve 保证为有效值）
+        norm = [(k, (c or "").strip() or None, (p or "").strip() or None)
+                for k, c, p in players]
+        keys = [k for k, _, _ in norm]
+        cards = [c for _, c, _ in norm if is_valid_id(c)]
+        phones = [p for _, _, p in norm if is_valid_phone(p)]
+
+        conditions = [EloPlayerRating.player_key.in_(keys)]
+        if cards:
+            conditions.append(EloPlayerRating.card_code.in_(cards))
+        if phones:
+            conditions.append(EloPlayerRating.phone.in_(phones))
         stmt = select(EloPlayerRating).where(
-            EloPlayerRating.card_code.in_(card_codes),
+            or_(*conditions),
             EloPlayerRating.sport_type == CURRENT_SPORT,
         )
         result_db = await self.db.execute(stmt)
         rows = result_db.scalars().all()
-        rating_map = {r.card_code: r for r in rows}
 
         states: list[_PlayerState] = []
-        for code in card_codes:
-            r = rating_map.get(code)
-            if r is None:
-                states.append(_PlayerState(code, 1500.0, 0, 0, 0))
+        for key, card, phone in norm:
+            existing = self._pick_existing(rows, key, card, phone)
+            if existing is None:
+                states.append(_PlayerState(key, card, phone, 1500.0, 0, 0, 0))
             else:
                 states.append(_PlayerState(
-                    code,
-                    float(r.rating),
-                    r.games,
-                    r.wins,
-                    r.losses,
+                    existing.player_key,
+                    card or existing.card_code,
+                    phone or existing.phone,
+                    float(existing.rating),
+                    existing.games,
+                    existing.wins,
+                    existing.losses,
                 ))
         return states
+
+    @staticmethod
+    def _pick_existing(
+        rows: list,
+        key: str,
+        card: Optional[str],
+        phone: Optional[str],
+    ):
+        """从候选已有身份中按优先级选中一条；未命中返回 None。
+
+        优先级：`player_key` 精确命中 > 身份证 > 手机号。
+        """
+        for r in rows:
+            if r.player_key == key:
+                return r
+        if is_valid_id(card):
+            for r in rows:
+                if r.card_code == card:
+                    return r
+        if is_valid_phone(phone):
+            for r in rows:
+                if r.phone == phone:
+                    return r
+        return None
 
     # ── 归属地区查询 ──
 
@@ -373,8 +436,8 @@ class EloService:
         team_side: str,
         is_winner: bool,
         team_size: int,
-        opponent_card_code: str,
-        opponent_partner_card_code: Optional[str],
+        opponent_player_key: str,
+        opponent_partner_player_key: Optional[str],
         score_self: int,
         score_opponent: int,
         played_at: datetime,
@@ -382,14 +445,14 @@ class EloService:
         """对一方的所有队员：写 record + 更新 rating + 构建响应。"""
         player_results = []
         for state, result in zip(states, results):
-            self._save_record(match_data, state.card_code, result, team_side,
+            self._save_record(match_data, state, result, team_side,
                               team_size, is_winner,
-                              opponent_card_code, opponent_partner_card_code,
+                              opponent_player_key, opponent_partner_player_key,
                               score_self, score_opponent, played_at)
             await self._upsert_rating(state, result)
             player_results.append(self._build_result(
                 state, result, team_side, is_winner,
-                opponent_card_code, opponent_partner_card_code,
+                opponent_player_key, opponent_partner_player_key,
             ))
         return player_results
 
@@ -398,13 +461,13 @@ class EloService:
     def _save_record(
         self,
         match_data: _MatchData,
-        card_code: str,
+        player: _PlayerState,
         result: EloResult,
         team_side: str,
         team_size: int,
         is_winner: bool,
-        opponent_card_code: str,
-        opponent_partner_card_code: Optional[str],
+        opponent_player_key: str,
+        opponent_partner_player_key: Optional[str],
         score_self: int,
         score_opponent: int,
         played_at: datetime,
@@ -417,7 +480,9 @@ class EloService:
             event_id=match_data.event_id,
             battle_id=match_data.battle_id,
             source_order=match_data.source_order,
-            card_code=card_code,
+            player_key=player.player_key,
+            card_code=player.card_code,
+            phone=player.phone,
             team_side=team_side,
             team_size=team_size,
             is_winner=1 if is_winner else 0,
@@ -432,8 +497,8 @@ class EloService:
             clamped_delta=Decimal(str(bd.clamped_delta)).quantize(Decimal("0.01")),
             upset_bonus=Decimal(str(bd.upset_bonus)).quantize(Decimal("0.01")),
             upset_penalty=Decimal(str(bd.upset_penalty)).quantize(Decimal("0.01")),
-            opponent_card_code=opponent_card_code,
-            opponent_partner_card_code=opponent_partner_card_code,
+            opponent_card_code=opponent_player_key,
+            opponent_partner_card_code=opponent_partner_player_key,
             score_self=score_self,
             score_opponent=score_opponent,
             played_at=played_at,
@@ -443,7 +508,7 @@ class EloService:
     async def _upsert_rating(self, player: _PlayerState, result: EloResult) -> None:
         """更新或创建选手 Elo 评分。"""
         stmt = select(EloPlayerRating).where(
-            EloPlayerRating.card_code == player.card_code,
+            EloPlayerRating.player_key == player.player_key,
             EloPlayerRating.sport_type == CURRENT_SPORT,
         )
         result_db = await self.db.execute(stmt)
@@ -453,10 +518,14 @@ class EloService:
         delta_losses = result.losses_after - player.losses
 
         if rating is None:
-            # 查询 motion_user 获取归属地区（仅在创建新选手时）
-            province, city = await self._fetch_region(player.card_code)
+            # 查询 motion_user 获取归属地区（仅真正有身份证的选手才查）
+            province, city = (None, None)
+            if player.card_code:
+                province, city = await self._fetch_region(player.card_code)
             new_rating = EloPlayerRating(
+                player_key=player.player_key,
                 card_code=player.card_code,
+                phone=player.phone,
                 sport_type=CURRENT_SPORT,
                 rating=Decimal(str(result.rating_after)).quantize(Decimal("0.01")),
                 games=result.games_after,
@@ -475,6 +544,12 @@ class EloService:
             rating.wins = rating.wins + delta_wins
             rating.losses = rating.losses + delta_losses
 
+            # 回填本次新增的身份证/手机号（如手机号选手后补身份证）
+            if player.card_code and not rating.card_code:
+                rating.card_code = player.card_code
+            if player.phone and not rating.phone:
+                rating.phone = player.phone
+
             if result.rating_after > float(rating.highest_rating):
                 rating.highest_rating = Decimal(str(result.rating_after)).quantize(Decimal("0.01"))
             if result.rating_after < float(rating.lowest_rating):
@@ -488,14 +563,14 @@ class EloService:
         result: EloResult,
         team_side: str,
         is_winner: bool,
-        opponent_card_code: str,
-        opponent_partner_card_code: Optional[str],
+        opponent_player_key: str,
+        opponent_partner_player_key: Optional[str],
     ) -> PlayerResult:
-        """构建响应中的 PlayerResult。"""
+        """构建响应中的 PlayerResult（card_code 字段返回统一定位键）。"""
         rating_before = result.rating_after - result.delta
         bd = result.breakdown
         return PlayerResult(
-            card_code=state.card_code,
+            card_code=state.player_key,
             delta=result.delta,
             rating_after=result.rating_after,
             games_after=result.games_after,
@@ -510,8 +585,8 @@ class EloService:
             clamped_delta=bd.clamped_delta,
             upset_bonus=bd.upset_bonus,
             upset_penalty=bd.upset_penalty,
-            opponent_card_code=opponent_card_code,
-            opponent_partner_card_code=opponent_partner_card_code,
+            opponent_card_code=opponent_player_key,
+            opponent_partner_card_code=opponent_partner_player_key,
         )
 
 

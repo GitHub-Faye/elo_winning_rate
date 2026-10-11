@@ -137,7 +137,7 @@ async def get_match_detail(
         rank_after = get_badminton_rank(rating_after, 2)
 
         players.append(MatchPlayerResult(
-            card_code=r.card_code,
+            card_code=r.player_key,
             team_side=r.team_side,
             is_winner=bool(r.is_winner),
             rating_before=rating_before,
@@ -155,7 +155,7 @@ async def get_match_detail(
         # 找到目标选手的比赛记录
         target_record = None
         for r in records:
-            if r.card_code == card_code:
+            if r.player_key == card_code:
                 target_record = r
                 break
 
@@ -169,7 +169,7 @@ async def get_match_detail(
                 EloPlayerRating.city,
                 EloPlayerRating.games,
             ).where(
-                EloPlayerRating.card_code == card_code,
+                EloPlayerRating.player_key == card_code,
                 EloPlayerRating.sport_type == sport_type,
             )
             player_result = await db.execute(player_stmt)
@@ -212,7 +212,7 @@ async def get_match_detail(
                     conditions.append(EloPlayerRating.province == province)
 
                 region_stmt = select(
-                    EloPlayerRating.card_code,
+                    EloPlayerRating.player_key,
                     EloPlayerRating.rating,
                 ).where(*conditions)
                 region_result = await db.execute(region_stmt)
@@ -220,14 +220,14 @@ async def get_match_detail(
 
                 # 赛前排名（用 rating_before）
                 region_rank_before, region_total = _compute_region_rank(
-                    [(r.card_code, float(r.rating)) for r in region_rows],
+                    [(r.player_key, float(r.rating)) for r in region_rows],
                     card_code,
                     rating_before,
                 )
 
                 # 赛后排名（用 rating_after）
                 region_rank_after, _ = _compute_region_rank(
-                    [(r.card_code, float(r.rating)) for r in region_rows],
+                    [(r.player_key, float(r.rating)) for r in region_rows],
                     card_code,
                     rating_after,
                 )

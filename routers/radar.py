@@ -1,4 +1,4 @@
-"""单打选手六维雷达图 API 路由 — 按身份证查询最近 N 场单打的进攻/防守/发球/接发/抗压/场区"""
+"""单打选手六维雷达图 API 路由 — 按统一定位键（身份证或手机号）查询最近 N 场单打的进攻/防守/发球/接发/抗压/场区"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/v1", tags=["radar"])
         400: {"model": ErrorResponse, "description": "请求参数错误（未找到选手或无单打记录）"},
     },
     summary="查询单名选手最近 N 场单打的六维雷达图",
-    description="""根据身份证号查询选手最近 N 场单打比赛的六维雷达图分数。
+    description="""根据统一定位键（身份证或手机号）查询选手最近 N 场单打比赛的六维雷达图分数。
 
 六维指标（0-100，越高越强，通过发球权 serverBall 判定攻守）：
 - 进攻：本方有发球权时得分率（归一化）

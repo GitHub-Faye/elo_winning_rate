@@ -279,3 +279,186 @@ delta = clamp(K × M₁ × M₂ × [M₃...] × (S - E), ±[cap₁...]) + bonus�
 ```
 
 预测不参与 Elo 更新（不回写），因此不进入公式模板。其场景原子与评分引擎共享 `队伍 Elo 差` 和 `relation_graph`。
+
+---
+
+## 8. 参数训练方法
+
+所有可调超参数集中在 `elo_compute.EloConfig`（frozen dataclass）。训练 = 「在历史比赛集上按时间重放 → 计算预测损失 → 搜索更优参数」。项目已具备训练所需的地基：`best_config.json` + `import_historical_matches.load_best_config()` / `_config_from_dict()` 已能在重放时注入参数，缺的只是「损失函数 + 搜索循环」。
+
+> ⚠ 本节参数一律以 **`elo_compute.EloConfig` 当前代码默认值**为准。第 2/3 节里 K=40/28/20、观察期 `< 30`、越级门槛 `ΔElo ≥ 150` 是早期设计稿，已废弃，实际代码为 K=80/30/15、`provisional_games=60`、`upset_min_rating_gap=50`。
+
+### 8.1 训练目标：对数损失（log-loss）
+
+Elo 系统的可预测量是「每场每方的预期胜率 E」。训练目标 = 让 E 尽量贴近真实结果 y（胜=1，负=0）：
+
+```
+L = −( y·ln E + (1−y)·ln(1−E) )
+```
+
+- 求所有 `elo_match_record` 行的均值（每场有 A/B 两方，双方 E 相加 =1，损失对称，可每场只算一方）。
+- **关键**：E 会随参数变而整体重算，所以 **不能拿库里已存的 `expected` 直接算损失，必须用候选参数重新回放一遍**。
+- 备选：Brier 分数 `(E−y)²`（对极端预测更宽容）、准确率（只作粗筛，不够敏感）。
+
+### 8.2 数据切分（必须按时间序，禁止 shuffle）
+
+Elo 顺序累积、样本不独立：
+
+- 按 `battle_time → source_order → battle_id` 升序
+- 前 ~80% 时间窗作训练集、后 ~20% 作验证集（模拟「在线预测未来」）
+- 验证集新选手从 1500 冷启动，正好检验参数对新人的适应速度
+
+### 8.3 调参直觉（各参数作用方向）
+
+表中为 `EloConfig` 当前默认值：
+
+| 参数 | 默认 | 调大 → | 调小 → |
+|---|---|---|---|
+| `new_player_k` | 80 | 新人快速到位、波动大 | 收敛慢、更稳 |
+| `provisional_k` | 30 | 观察期更激进 | 更保守 |
+| `stable_k` | 15 | 老手排名易躁动 | 排名稳但滞后 |
+| `new_player_games` / `provisional_games` | 2 / 60 | 新人/观察期拉长 | 更快进入稳定期 |
+| `elo_scale` | 200 | 分差对 E 影响变小（保守） | 分差放大（激进） |
+| `delta_cap` | 80 | 单场波动上限变大 | 波动收窄 |
+| `upset_min_rating_gap` | 50 | 越级更难触发 | 更易触发 |
+| `upset_bonus_per_100` / `upset_bonus_cap` | 15 / 25 | 越级加更多 | 加更少 |
+| `upset_loser_penalty_ratio` | 0.5 | 被爆冷罚更重 | 罚更轻 |
+
+> 注意：`event_weight` 现被接口硬编码为 1.0（`match_weight` 也 = 1.0），即 `M_weight` 恒为 1、是空操作。**赛事权重这一维的训练需先恢复 event_id → weight 的映射**。
+
+### 8.4 搜索方法
+
+参数空间小（~12 个）但目标非光滑（K 分段常数、clamp / bonus / penalty 有硬阈值），不宜用梯度法：
+
+1. **坐标下降**：固定其余参数，逐参数一维搜索（网格或黄金分割），收敛快、可解释
+2. 优先调**离散/分段参数**：`new_player_games`、`provisional_games`、三档 K、`upset_min_rating_gap`
+3. 再调**连续参数**：`elo_scale`、`delta_cap`、`upset_bonus_per_100`、`upset_bonus_cap`、`upset_loser_penalty_ratio`
+4. 每组候选参数都要**整集重放**；可多进程并行 + 只跑纯函数（不落库）加速
+
+### 8.5 诊断指标（除 log-loss 外）
+
+- **log-loss**（主目标，越低越好）
+- **校准曲线**：把 E 分桶（0~0.1、0.1~0.2…），桶内真实胜率应 ≈ 桶中心
+- **新人收敛速率**：新选手前 N 场的 log-loss 是否随 K 增大而快速下降
+- **训练/验证差**：差值大说明过拟合，应减小参数自由度或回退
+
+### 8.6 落地步骤（对应本项目）
+
+1. 复用 `import_historical_matches.extract_importable_matches()` 取全量有序比赛
+2. 写 `train_elo_params.py`：遍历候选 `EloConfig` → 用 `elo_compute.compute_match_pair() / compute_team_match()` **纯函数在内存重放**（不写库）→ 累加 log-loss → 记录「参数 → 训练/验证 log-loss」
+3. 选验证集最优且训练/验证差小的一组
+4. 把结果写入 `best_config.json`（`_config_from_dict` 已能自动加载），跑一次全量 `import_historical_matches.py` 落库
+
+> 轻量替代：若不想重复搭内存重放，可把每组参数用 `replay_matches()` 灌进一个**临时库**，再 `SELECT expected, is_winner FROM elo_match_record` 算 log-loss——复用现有代码，但每轮都要清库重放、慢一些。
+
+---
+
+## 9. 单打选手六维雷达图设计
+
+雷达图是**独立于 Elo 的查询层**：不参与积分运算、不回写任何表。它从外部赛事记分链路重建「逐分事件流」，把选手能力拆成六个 0–100 的维度，用于呈现选手风格画像。对应实现：`services/radar_service.py` + `routers/radar.py`，调参常量集中在文件头部。
+
+### 9.1 边界与前提
+
+- **只统计单打**（`motion_tool_score_team.score_type = 1`）；双打 / 五羽轮比 / 团体（score_type=2/3）一律排除。
+- 取选手**最近 N 场**单打（默认 10，接口上限 50），并非全历史。
+- 依赖记分系统把**每一分**都落到 `motion_tool_score_log`，并用 `station` JSON 里的 `serverBall` 区分发球权——没有逐分日志就无从谈起。
+- 选手定位键与 Elo 一致：身份证优先，否则手机号（`get_battles_by_player_key`）。
+
+### 9.2 数据链路
+
+```
+card_code / phone（统一定位键）
+  → motion_event_apply_user_setting（user_setting_id, name）
+  → get_battles_by_player_key（该选手所有对阵 battle_id）
+  → battle_to_score_team（逐个 battle 关联记分表，只保留 score_type=1 单打）
+  → motion_tool_score_team（score_team_id, team_one/two_score, 比分, create_time）
+  → fetch_logs → motion_tool_score_log（log_id 升序：逐分 + is_revoke=0）
+  → rebuild_score_sequence（按 round_num 重建每局事件序列，含发球权/换边标记）
+  → 六维计算（纯函数，可单测）
+```
+
+### 9.3 六维指标定义
+
+| 维度 | 原始量 | 公式 / 说明 |
+|---|---|---|
+| **进攻 offense** | 本方有发球权时的得分率 | `my_serve_won / my_serve_pts × 100`，再经 `sigmoid_map` 归一化 |
+| **防守 defense** | 本方接对方发球时的得分率 | `opp_serve_won / opp_serve_pts × 100`，同上归一化 |
+| **发球 serve** | 本方发球回合得分率 | 与进攻同源（`serve = offense`） |
+| **接发 receive** | 本方接发回合得分率 | 与防守同源（`receive = defense`） |
+| **抗压 anti_pressure** | 落后/逆转/关键分表现 | 见 9.4 公式，跨局逆风加权 |
+| **场区 field** | 换边前后落差 | `100 − (ΔP×2.2 + ΔE×3.0 + ΔO×1.8)`，落差越小分越高 |
+
+> 发球权判定：`station` JSON 中 `teamType == 我方` 的一方 `serverBall == true` → 本方发球；解析失败则该事件不参与攻/防统计（`my_serve is None` 跳过）。
+
+### 9.4 标准化与公式细节
+
+**① 得分率归一化（进攻/防守/发球/接发共用）**
+
+```
+sigmoid_map(pct) = 100 / (1 + e^(−SIGMOID_K × (pct − SIGMOID_CENTER)))
+默认 SIGMOID_K=12, SIGMOID_CENTER=0.50（50% → 50 分）
+```
+
+用 sigmoid 而非线性：次极端值被拉开、极端值压缩到上下界，六维图视觉区分度更高。
+
+**② 抗压（逐局，再跨局加权）**
+
+```
+S = 50 + 3.5·D − 2.5·L + 20·R + 15·K − E_COEF·E   （clamp 0–100）
+
+D = 本局最大落后分差
+L = 本局最长连续失分
+R = 逆转标志：D>0 且最终胜=1，D>0 且最终负=0，否则=0.5
+K = 关键分胜率：任一方打到 20 分（GAME_CAP−1）且分差 ≤1 的回合中本方得分占比
+E = 落后阶段失误数（deficit>0 且本方丢分的次数），E_COEF=1.0 压低其权重
+```
+
+跨局加权平均：**逆转局 ×1.2**、**顺风局（全程未落后）×0.8**、其余 ×1.0。
+
+**③ 场区（换边前后落差）**
+
+先把一局按换边拆成前后两段：
+- 有 `is_sides` 日志 → 用换边事件切分；
+- 无换边日志 → 用羽毛球规则近似（任一方达到 11 分换边）。
+
+```
+ΔP = |本方前段得分 − 本方后段得分|
+ΔE = |对手前段得分 − 对手后段得分|
+ΔO = ΔP（无进攻分类，用得分差近似）
+field = clamp(100 − (ΔP×2.2 + ΔE×3.0 + ΔO×1.8), 0, 100)
+```
+
+含义：换边后比分走势越平稳（落差小），对场地适应性越好，分越高。
+
+### 9.5 连续得分 / 连续失分（附加指标）
+
+不归入六维，作为看板附加项：
+
+- **平均连续得分 avg_score** = 连胜片段的平均长度
+- **平均连续失分 avg_lose** = 连失片段的平均长度
+- **最大连胜 max_score** / **最大连失 max_lose**（单场维度）
+
+### 9.6 汇总与接口
+
+每场先算六维 → 对最近 N 场的各维**取算术平均**输出：
+
+```
+GET /api/v1/radar/{card_code}?limit=10
+→ { name, card_code, matches, total_singles,
+    offense, defense, serve, receive, anti_pressure, field,
+    consecutive_score, consecutive_lose, match_details[] }
+```
+
+`matches` = 实际参与计算的场数（最近 N 场单打），`total_singles` = 历史全部单打场数。
+
+### 9.7 调参常量（`radar_service.py` 头部）
+
+| 常量 | 默认 | 作用 |
+|---|---|---|
+| `E_COEF` | 1.0 | 抗压公式里「落后失误 E」的系数（已压低，因 E≈落后丢分非真失误） |
+| `SIGMOID_K` | 12.0 | 得分率归一化的 sigmoid 斜率（越大中间越陡） |
+| `SIGMOID_CENTER` | 0.50 | 归一化中心（50% 映射 50 分） |
+| `GAME_CAP` | 21 | 每局封顶分（关键分判定用 `GAME_CAP−1=20`） |
+| `MAX_RECENT_GAMES` | 10 | 默认取最近 N 场单打 |
+
+> 扩展方向：`serve`/`receive` 当前与 `offense`/`defense` 同源，是占位实现了「发/接发」两个轴；若要真正区分，需在记分日志里补充回合性质（如发球直接得分率、抢攻率）再单独计算。

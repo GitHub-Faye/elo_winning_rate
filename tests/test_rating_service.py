@@ -83,7 +83,7 @@ def _make_row(card_code: str, rating: float, games: int, wins: int = 0, losses: 
     """构造一条 EloPlayerRating（SimpleNamespace）。"""
     from types import SimpleNamespace
     return SimpleNamespace(
-        card_code=card_code,
+        player_key=card_code,
         rating=rating,
         games=games,
         wins=wins,
@@ -210,7 +210,7 @@ def _make_db_with_region(player_rows: list, region_rows: list) -> AsyncMock:
 def _make_region_row(card_code: str, rating: float):
     """构造一条地区排名查询结果（SimpleNamespace）。"""
     from types import SimpleNamespace
-    return SimpleNamespace(card_code=card_code, rating=rating)
+    return SimpleNamespace(player_key=card_code, rating=rating)
 
 
 @pytest.mark.asyncio

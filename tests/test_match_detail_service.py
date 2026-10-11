@@ -50,6 +50,7 @@ def _make_match_record(
         event_id=event_id,
         battle_id=battle_id,
         source_order=0,
+        player_key=card_code,
         card_code=card_code,
         team_side=team_side,
         team_size=team_size,
@@ -202,9 +203,9 @@ async def test_singles_with_card_code():
     player_row = ("山西省", "太原市", 10)
     # mock 第三次查询：地区已定级选手
     region_rows = [
-        SimpleNamespace(card_code=CARD_A, rating=1575.5),  # 赛后
-        SimpleNamespace(card_code=CARD_B, rating=1484.5),
-        SimpleNamespace(card_code=CARD_C, rating=1600.0),
+        SimpleNamespace(player_key=CARD_A, rating=1575.5),  # 赛后
+        SimpleNamespace(player_key=CARD_B, rating=1484.5),
+        SimpleNamespace(player_key=CARD_C, rating=1600.0),
     ]
 
     db = AsyncMock(spec=AsyncSession)
@@ -279,8 +280,8 @@ async def test_rank_change_after_match():
 
     player_row = ("山西省", "太原市", 10)
     region_rows = [
-        SimpleNamespace(card_code=CARD_A, rating=1610.0),
-        SimpleNamespace(card_code=CARD_B, rating=1485.0),
+        SimpleNamespace(player_key=CARD_A, rating=1610.0),
+        SimpleNamespace(player_key=CARD_B, rating=1485.0),
     ]
 
     db = AsyncMock(spec=AsyncSession)
@@ -314,7 +315,7 @@ async def test_already_9段_no_next_tier():
 
     player_row = ("山西省", "太原市", 10)
     region_rows = [
-        SimpleNamespace(card_code=CARD_A, rating=1960.0),
+        SimpleNamespace(player_key=CARD_A, rating=1960.0),
     ]
 
     db = AsyncMock(spec=AsyncSession)
@@ -344,8 +345,8 @@ async def test_region_rank_improvement():
     # 赛前：B(1600) > A(1595) → A 排第 2
     # 赛后：A(1615) > B(1580) → A 排第 1
     region_rows = [
-        SimpleNamespace(card_code=CARD_A, rating=1595.0),
-        SimpleNamespace(card_code=CARD_B, rating=1600.0),
+        SimpleNamespace(player_key=CARD_A, rating=1595.0),
+        SimpleNamespace(player_key=CARD_B, rating=1600.0),
     ]
 
     db = AsyncMock(spec=AsyncSession)

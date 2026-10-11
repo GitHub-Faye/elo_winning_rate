@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/v1/elo", tags=["elo"])
     "/record",
     response_model=EloRecordResponse,
     responses={
-400: {"model": ErrorResponse, "description": "业务校验失败（如比赛不存在、人数不匹配、无有效局数据）"},
+        400: {"model": ErrorResponse, "description": "业务校验失败（如比赛不存在、人数不匹配、无有效局数据）"},
         422: {"model": ErrorResponse},
     },
     summary="记录一场比赛并计算 Elo 变化",
@@ -27,17 +27,17 @@ router = APIRouter(prefix="/api/v1/elo", tags=["elo"])
 
 **工作流程：**
 1. 根据 `battle_id` 查询 `motion_event_layout_stage_battle` 获取比分和选手信息
-2. 通过 `battle_card_service` 解析选手身份证号（card_code）
-3. 过滤掉无有效身份证号的选手（18位），只保留有效选手参与计算
+2. 通过 `battle_card_service` 解析选手统一定位键（身份证优先，否则手机号）
+3. 过滤掉既无有效身份证号也无有效手机号的选手
 4. 多局比赛逐局独立计算 Elo，取均值作为最终变化
 5. 胜负由「谁赢的局更多」决定（非总分）
 
 **支持场景：**
 - 单打（每队 1 人）和双打（每队 2 人）
-- 部分选手无身份证号时，跳过无身份证号的选手，有效选手正常计算
+- 部分选手无身份证（但有手机号）时，按手机号定位
 - 新选手默认 Elo 为 1500
 
-**身份证号解析路径：**
+**定位键解析路径：**
 - 团体赛：`player_one_user_ids` → `apply_user_setting` → `card_code`
 - 单体赛：`player_one_id` → `stage_player` → `apply_id` → `apply_user_setting` → `card_code`
 """,

@@ -5,7 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.battle_card_service import (
     get_card_codes_by_battle_id,
-    get_battles_by_card_code,
+    get_battles_by_player_key,
+    resolve_player_key,
 )
 
 
@@ -142,9 +143,28 @@ async def test_get_card_codes_not_found():
     assert result is None
 
 
+def test_resolve_player_key_prefers_card():
+    """身份证号优先于手机号。"""
+    assert resolve_player_key("110101199001011234", "13800138000") == "110101199001011234"
+
+
+def test_resolve_player_key_falls_back_to_phone():
+    """身份证非法/缺失时回退到手机号。"""
+    assert resolve_player_key("123", "13800138000") == "13800138000"
+    assert resolve_player_key("", "13800138000") == "13800138000"
+    assert resolve_player_key(None, "13800138000") == "13800138000"
+
+
+def test_resolve_player_key_both_invalid():
+    """身份证和手机号都不合法 → None。"""
+    assert resolve_player_key("123", "12345") is None
+    assert resolve_player_key("", "") is None
+    assert resolve_player_key(None, None) is None
+
+
 @pytest.mark.asyncio
-async def test_get_battles_by_card_code():
-    """测试根据身份证号查询对阵"""
+async def test_get_battles_by_player_key():
+    """测试根据统一定位键（身份证或手机号）查询对阵"""
     db = AsyncMock(spec=AsyncSession)
 
     # Mock user_setting 查询结果
@@ -191,7 +211,7 @@ async def test_get_battles_by_card_code():
     ])
 
     # 执行测试
-    result = await get_battles_by_card_code(db, "110101199001011234")
+    result = await get_battles_by_player_key(db, "110101199001011234")
 
     # 验证结果
     assert len(result) == 2

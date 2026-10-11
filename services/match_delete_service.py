@@ -121,13 +121,13 @@ def _match_type(match_rows: list[EloMatchRecord]) -> str:
 
 
 def _dedupe(match_rows: list[EloMatchRecord]) -> list[tuple[str, EloMatchRecord]]:
-    """按 card_code 去重,返回 [(card_code, 该场中一条记录), ...]。"""
+    """按 player_key 去重,返回 [(player_key, 该场中一条记录), ...]。"""
     seen: set[str] = set()
     out: list[tuple[str, EloMatchRecord]] = []
     for r in match_rows:
-        if r.card_code not in seen:
-            seen.add(r.card_code)
-            out.append((r.card_code, r))
+        if r.player_key not in seen:
+            seen.add(r.player_key)
+            out.append((r.player_key, r))
     return out
 
 
@@ -140,18 +140,18 @@ async def _latest_match_flags(
     仅做内存内判断(读当前所有记录比对),不写库。
     返回 {card_code: 该选手本场 id 是否为其全部记录中最大}。
     """
-    codes = list({r.card_code for r in match_rows})
+    codes = list({r.player_key for r in match_rows})
 
     # 各选手在该场中的最大 id(双打 2 行取较大者,统一为一行)
     this_max_id: dict[str, int] = {}
     for r in match_rows:
-        if this_max_id.get(r.card_code, 0) < r.id:
-            this_max_id[r.card_code] = r.id
+        if this_max_id.get(r.player_key, 0) < r.id:
+            this_max_id[r.player_key] = r.id
 
     # 各选手在所有记录中的最大 id(一条查询拿到全局最大)
     result = await db.execute(
-        select(EloMatchRecord.card_code, EloMatchRecord.id).where(
-            EloMatchRecord.card_code.in_(codes)
+        select(EloMatchRecord.player_key, EloMatchRecord.id).where(
+            EloMatchRecord.player_key.in_(codes)
         )
     )
     global_max_id: dict[str, int] = {}
@@ -180,7 +180,7 @@ async def _rollback_player(
     # 是否存在该选手的积分记录(应有,因为该场已记录过)
     result = await db.execute(
         select(EloPlayerRating).where(
-            EloPlayerRating.card_code == card_code,
+            EloPlayerRating.player_key == card_code,
             EloPlayerRating.sport_type == CURRENT_SPORT,
         )
     )

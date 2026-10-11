@@ -6,8 +6,9 @@
 双打：一场比赛产生 4 条记录（A 方 2 人 + B 方 2 人）
 
 选手定位键说明：
-  - card_code（身份证号）是唯一可靠定位（未注册用户无 user_id，
-    motion_event_apply_user_setting.member_id = 0，但 card_code 必有）
+  - player_key（统一定位键）= card_code（身份证号）优先，否则 phone（手机号）；
+    未注册用户无 user_id（motion_event_apply_user_setting.member_id = 0），
+    靠 card_code 或 phone 定位
   - event_id → motion_event.event_id（数据链路已验证注入，数据库层不设 FK）
   - battle_id → motion_event_layout_stage_battle.battle_id（同上）
 """
@@ -27,12 +28,12 @@ class EloPlayerRating(SQLModel, table=True):
 
     __tablename__ = "elo_player_rating"
 
-    card_code: str = Field(
+    player_key: str = Field(
         sa_column=Column(
-            "card_code",
-            VARCHAR(32),
+            "player_key",
+            VARCHAR(64),
             primary_key=True,
-            comment="选手身份证号，逻辑外键 → motion_event_apply_user_setting.card_code（数据链路保证，不设数据库 FK）",
+            comment="统一选手定位键：身份证号优先，否则手机号",
         ),
     )
     sport_type: str = Field(
@@ -40,6 +41,16 @@ class EloPlayerRating(SQLModel, table=True):
         primary_key=True,
         sa_type=VARCHAR(32),
         sa_column_kwargs={"comment": "运动品类，如 badminton / tabletennis"},
+    )
+    card_code: Optional[str] = Field(
+        default=None,
+        sa_column=Column("card_code", VARCHAR(32), nullable=True,
+                         comment="身份证号（参考字段，逻辑外键 → motion_event_apply_user_setting.card_code）"),
+    )
+    phone: Optional[str] = Field(
+        default=None,
+        sa_column=Column("phone", VARCHAR(50), nullable=True,
+                         comment="手机号（参考字段，逻辑外键 → motion_event_apply_user_setting.phone）"),
     )
     rating: Decimal = Field(
         default=Decimal("1500.00"),
@@ -124,9 +135,18 @@ class EloMatchRecord(SQLModel, table=True):
         sa_column_kwargs={"comment": "赛事内场序号（event_index），用于回放排序"},
     )
 
-    # ── 选手维度（一人一条，身份证号定位） ──
-    card_code: str = Field(
-        sa_column=Column("card_code", VARCHAR(32), comment="选手身份证号"),
+    # ── 选手维度（一人一条，统一定位键） ──
+    player_key: str = Field(
+        sa_column=Column("player_key", VARCHAR(64), nullable=False, index=True,
+                         comment="统一选手定位键：身份证号优先，否则手机号"),
+    )
+    card_code: Optional[str] = Field(
+        default=None,
+        sa_column=Column("card_code", VARCHAR(32), nullable=True, comment="身份证号（参考字段）"),
+    )
+    phone: Optional[str] = Field(
+        default=None,
+        sa_column=Column("phone", VARCHAR(50), nullable=True, comment="手机号（参考字段）"),
     )
     team_side: str = Field(
         sa_type=VARCHAR(1),
@@ -193,7 +213,7 @@ class EloMatchRecord(SQLModel, table=True):
 
     # ── 对方信息 ──
     opponent_card_code: str = Field(
-        sa_column=Column("opponent_card_code", VARCHAR(32), comment="对手身份证号（双打时为第一个对手）"),
+        sa_column=Column("opponent_card_code", VARCHAR(32), comment="对手统一定位键（双打时为第一个对手）"),
     )
     opponent_partner_card_code: Optional[str] = Field(
         default=None,

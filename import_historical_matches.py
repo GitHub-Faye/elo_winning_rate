@@ -274,7 +274,7 @@ async def print_summary(session: AsyncSession, matched: int) -> None:
         "SELECT event_id, COUNT(*) FROM elo_match_record"
     ))
     r4 = await session.execute(text(
-        "SELECT card_code, rating, games, wins, losses "
+        "SELECT player_key, rating, games, wins, losses "
         "FROM elo_player_rating ORDER BY rating DESC LIMIT 15"
     ))
     print(f"\n{'=' * 60}")

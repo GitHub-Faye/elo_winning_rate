@@ -37,7 +37,7 @@ def _rec(
     """构造一条 EloMatchRecord(SimpleNamespace)。"""
     return SimpleNamespace(
         id=rid, event_id=1, battle_id=100, source_order=0,
-        card_code=card_code, team_side=team_side, team_size=team_size,
+        player_key=card_code, card_code=card_code, team_side=team_side, team_size=team_size,
         is_winner=is_winner,
         rating_before=Decimal(str(rating_before)),
         delta=Decimal(str(delta)),
@@ -65,7 +65,7 @@ def _rating(
 ):  # -> SimpleNamespace
     """构造一条 EloPlayerRating(SimpleNamespace)。"""
     return SimpleNamespace(
-        card_code=card_code, sport_type="badminton",
+        player_key=card_code, card_code=card_code, sport_type="badminton",
         rating=Decimal(str(rating)), games=games, wins=wins, losses=losses,
         draws=0, highest_rating=Decimal("1600.00"), lowest_rating=Decimal("1390.00"),
     )

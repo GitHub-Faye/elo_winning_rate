@@ -68,12 +68,12 @@ async def get_player_ratings(
     # 去重后查询（同一选手只查一次）
     unique_codes = list(dict.fromkeys(card_codes))
     stmt = select(EloPlayerRating).where(
-        EloPlayerRating.card_code.in_(unique_codes),
+        EloPlayerRating.player_key.in_(unique_codes),
         EloPlayerRating.sport_type == sport_type,
     )
     result_db = await db.execute(stmt)
     rows = result_db.scalars().all()
-    rating_map = {r.card_code: r for r in rows}
+    rating_map = {r.player_key: r for r in rows}
 
     results: list[PlayerRatingResult] = []
     for code in unique_codes:
@@ -151,16 +151,16 @@ async def get_player_ratings_with_ranking(
         conditions.append(EloPlayerRating.province == province)
 
     stmt = select(
-        EloPlayerRating.card_code,
+        EloPlayerRating.player_key,
         EloPlayerRating.rating,
     ).where(*conditions)
 
     result_db = await db.execute(stmt)
     region_rows = result_db.all()
 
-    # Step 4: 排序并构建 rank_map（rating DESC, card_code ASC）
-    region_rows.sort(key=lambda r: (-float(r.rating), r.card_code))
-    rank_map = {row.card_code: idx + 1 for idx, row in enumerate(region_rows)}
+    # Step 4: 排序并构建 rank_map（rating DESC, player_key ASC）
+    region_rows.sort(key=lambda r: (-float(r.rating), r.player_key))
+    rank_map = {row.player_key: idx + 1 for idx, row in enumerate(region_rows)}
     region_total = len(region_rows)
 
     # Step 5: 为每个请求的选手填充排名

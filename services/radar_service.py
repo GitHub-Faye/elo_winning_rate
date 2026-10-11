@@ -316,22 +316,22 @@ def calc_field(games: dict) -> dict:
 # 四、主流程
 # ──────────────────────────────────────────────
 async def profile_player_by_card(db: AsyncSession, card_code: str, limit: int = MAX_RECENT_GAMES) -> dict:
-    """按身份证计算选手最近 limit 场单打的六维雷达图。"""
-    from services.battle_card_service import get_battles_by_card_code
+    """按统一定位键（身份证优先，否则手机号）计算选手最近 limit 场单打的六维雷达图。"""
+    from services.battle_card_service import get_battles_by_player_key
 
     # 使用通用方法获取该选手参加的所有 battle
-    battles = await get_battles_by_card_code(db, card_code, limit=limit * 2)
+    battles = await get_battles_by_player_key(db, card_code, limit=limit * 2)
 
     if not battles:
-        raise ValueError(f"未找到身份证 {card_code} 对应的报名选手")
+        raise ValueError(f"未找到定位键 {card_code} 对应的报名选手")
 
     # 提取选手姓名（从 motion_event_apply_user_setting 查询）
     name = None
     user_setting_id = None
-    # 查询该 card_code 对应的 user_setting_id 和姓名
+    # 查询该定位键对应的 user_setting_id 和姓名
     stmt = text("""
         SELECT user_setting_id, name FROM motion_event_apply_user_setting
-        WHERE card_code = :card_code AND is_del = 0 LIMIT 1
+        WHERE (card_code = :card_code OR phone = :card_code) AND is_del = 0 LIMIT 1
     """)
     result = await db.execute(stmt, {"card_code": card_code})
     row = result.fetchone()
@@ -340,7 +340,7 @@ async def profile_player_by_card(db: AsyncSession, card_code: str, limit: int = 
         name = row[1]
 
     if name is None or user_setting_id is None:
-        raise ValueError(f"未找到身份证 {card_code} 对应的报名选手")
+        raise ValueError(f"未找到定位键 {card_code} 对应的报名选手")
 
     # 逐个 battle 关联到单打 score_team，过滤双打
     singles = []

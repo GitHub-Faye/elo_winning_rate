@@ -15,12 +15,12 @@ async def get_head_to_head(
 ) -> HeadToHeadData:
     """查询两名选手之间的所有交手记录（含单打和双打）。"""
     # 选手 A 的所有比赛
-    stmt_a = select(EloMatchRecord).where(EloMatchRecord.card_code == player_a_card)
+    stmt_a = select(EloMatchRecord).where(EloMatchRecord.player_key == player_a_card)
     result_a = await db.execute(stmt_a)
     records_a = list(result_a.scalars().all())
 
     # 选手 B 的所有比赛
-    stmt_b = select(EloMatchRecord).where(EloMatchRecord.card_code == player_b_card)
+    stmt_b = select(EloMatchRecord).where(EloMatchRecord.player_key == player_b_card)
     result_b = await db.execute(stmt_b)
     records_b = list(result_b.scalars().all())
 

@@ -1,4 +1,4 @@
-"""积分查询 API 路由 — 根据身份证号查询当前积分和段位"""
+"""积分查询 API 路由 — 根据统一定位键（身份证或手机号）查询当前积分和段位"""
 from __future__ import annotations
 
 from typing import Optional
@@ -30,7 +30,7 @@ DEFAULT_SPORT = "badminton"
         400: {"model": ErrorResponse, "description": "请求参数错误"},
     },
     summary="查询选手当前积分和段位",
-    description="""根据身份证号查询选手当前 Elo 积分、比赛场次和段位。
+    description="""根据统一定位键（身份证或手机号）查询选手当前 Elo 积分、比赛场次和段位。
 
 支持可选参数：
 - sport_type: 运动品类（默认 badminton）
@@ -66,7 +66,7 @@ async def get_rating(
         400: {"model": ErrorResponse, "description": "请求参数错误"},
     },
     summary="批量查询选手积分和段位",
-    description="""根据身份证号批量查询选手当前 Elo 积分和段位（去重，最多 50 个）。
+    description="""根据统一定位键（身份证或手机号）批量查询选手当前 Elo 积分和段位（去重，最多 50 个）。
 
 支持可选参数：
 - sport_type: 运动品类（默认 badminton）

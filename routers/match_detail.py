@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/v1", tags=["match"])
 
 支持可选参数：
 - sport_type: 运动品类（必填）
-- card_code: 指定选手身份证号。传入时额外返回该选手的：
+- card_code: 指定选手统一定位键（身份证或手机号）。传入时额外返回该选手的：
   - 距下一段位差分
   - 地区排名变化（赛前 vs 赛后）
 
@@ -36,7 +36,7 @@ async def get_match_detail_endpoint(
     sport_type: str = Query(..., description="运动品类（如 badminton）"),
     card_code: Optional[str] = Query(
         default=None,
-        description="指定选手身份证号（不传返回所有人基础变化）",
+        description="指定选手统一定位键（身份证或手机号，不传返回所有人基础变化）",
     ),
     db: AsyncSession = Depends(get_db),
 ) -> MatchDetailResponse:

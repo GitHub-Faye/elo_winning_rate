@@ -25,7 +25,7 @@ CARD_C = "110101199303036789"
 def _make_row(card_code: str, rating: float, games: int, wins: int = 0, losses: int = 0):
     """构造一条 EloPlayerRating（SimpleNamespace）。"""
     return SimpleNamespace(
-        card_code=card_code,
+        player_key=card_code,
         rating=rating,
         games=games,
         wins=wins,
@@ -53,8 +53,8 @@ def _make_db(applicant_rows: list, rating_rows: list) -> AsyncMock:
 async def test_event_ratings_with_registered_players():
     """已建档报名人：返回积分/场次/段位/姓名"""
     applicants = [
-        SimpleNamespace(card_code=CARD_A, name="张三"),
-        SimpleNamespace(card_code=CARD_B, name="李四"),
+        SimpleNamespace(card_code=CARD_A, phone=None, name="张三"),
+        SimpleNamespace(card_code=CARD_B, phone=None, name="李四"),
     ]
     ratings = [
         _make_row(CARD_A, 1764.32, 30, 20, 10),
@@ -84,7 +84,7 @@ async def test_event_ratings_with_registered_players():
 @pytest.mark.asyncio
 async def test_event_ratings_new_player_defaults():
     """报名但未建档选手 → 默认 1500 + 定级中 + is_new"""
-    applicants = [SimpleNamespace(card_code=CARD_A, name="张三")]
+    applicants = [SimpleNamespace(card_code=CARD_A, phone=None, name="张三")]
     db = _make_db(applicants, [])
     data = await get_event_ratings(db, 82)
 
@@ -103,9 +103,9 @@ async def test_event_ratings_new_player_defaults():
 async def test_event_ratings_dedupes_same_card():
     """同一身份证多次报名（多项目）→ 只保留一条"""
     applicants = [
-        SimpleNamespace(card_code=CARD_A, name="张三"),
-        SimpleNamespace(card_code=CARD_A, name="张三"),
-        SimpleNamespace(card_code=CARD_B, name="李四"),
+        SimpleNamespace(card_code=CARD_A, phone=None, name="张三"),
+        SimpleNamespace(card_code=CARD_A, phone=None, name="张三"),
+        SimpleNamespace(card_code=CARD_B, phone=None, name="李四"),
     ]
     ratings = [_make_row(CARD_A, 1600.0, 5)]
     db = _make_db(applicants, ratings)
@@ -128,9 +128,9 @@ async def test_event_ratings_empty_event():
 async def test_event_ratings_sorted_by_card():
     """结果按身份证号稳定排序"""
     applicants = [
-        SimpleNamespace(card_code=CARD_C, name="王五"),
-        SimpleNamespace(card_code=CARD_A, name="张三"),
-        SimpleNamespace(card_code=CARD_B, name="李四"),
+        SimpleNamespace(card_code=CARD_C, phone=None, name="王五"),
+        SimpleNamespace(card_code=CARD_A, phone=None, name="张三"),
+        SimpleNamespace(card_code=CARD_B, phone=None, name="李四"),
     ]
     ratings = [_make_row(CARD_A, 1500.0, 3)]
     db = _make_db(applicants, ratings)
@@ -143,8 +143,8 @@ async def test_event_ratings_sorted_by_card():
 async def test_event_ratings_mixed_registered_and_new():
     """部分建档：建档返回真实段位，未建档返回定级中"""
     applicants = [
-        SimpleNamespace(card_code=CARD_A, name="张三"),
-        SimpleNamespace(card_code=CARD_B, name="李四"),
+        SimpleNamespace(card_code=CARD_A, phone=None, name="张三"),
+        SimpleNamespace(card_code=CARD_B, phone=None, name="李四"),
     ]
     ratings = [_make_row(CARD_A, 1650.0, 10)]
     db = _make_db(applicants, ratings)

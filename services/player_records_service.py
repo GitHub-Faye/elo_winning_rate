@@ -36,7 +36,7 @@ async def get_player_records(
     """
     stmt = (
         select(EloMatchRecord)
-        .where(EloMatchRecord.card_code == card_code)
+        .where(EloMatchRecord.player_key == card_code)
         .order_by(EloMatchRecord.id.desc())
     )
     result = await db.execute(stmt)

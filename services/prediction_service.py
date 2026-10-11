@@ -135,14 +135,14 @@ class PredictionService:
     ) -> dict[str, PlayerRatingSnapshot]:
         """批量查询选手 Elo 评分，不存在的选手使用默认值。"""
         stmt = select(EloPlayerRating).where(
-            EloPlayerRating.card_code.in_(card_codes),
+            EloPlayerRating.player_key.in_(card_codes),
             EloPlayerRating.sport_type == CURRENT_SPORT,
         )
         result = await self.db.execute(stmt)
         rows = result.scalars().all()
         ratings: dict[str, PlayerRatingSnapshot] = {}
         for r in rows:
-            ratings[r.card_code] = PlayerRatingSnapshot(
+            ratings[r.player_key] = PlayerRatingSnapshot(
                 rating=float(r.rating),
                 games=r.games,
                 wins=r.wins,
