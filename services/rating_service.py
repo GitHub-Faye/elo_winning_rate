@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import EloPlayerRating
 from core.schemas import PlayerRatingResult, RatingQueryData
+from services.identity_service import resolve_to_primary
 
 # 段位门槛（分数从高到低，四舍五入后比较）
 BADMINTON_RANK_TIERS = [
@@ -67,8 +68,11 @@ async def get_player_ratings(
 
     # 去重后查询（同一选手只查一次）
     unique_codes = list(dict.fromkeys(card_codes))
+    # 统一路由到主账号：同一人多手机号/身份证落到同一主账号
+    primary_map = await resolve_to_primary(db, unique_codes, sport_type)
+    query_codes = list(dict.fromkeys(primary_map.values()))
     stmt = select(EloPlayerRating).where(
-        EloPlayerRating.player_key.in_(unique_codes),
+        EloPlayerRating.player_key.in_(query_codes),
         EloPlayerRating.sport_type == sport_type,
     )
     result_db = await db.execute(stmt)
@@ -77,11 +81,12 @@ async def get_player_ratings(
 
     results: list[PlayerRatingResult] = []
     for code in unique_codes:
-        r = rating_map.get(code)
+        primary = primary_map[code]
+        r = rating_map.get(primary)
         if r is None:
             # 未建档：按系统默认（与 elo_service 的新选手默认值一致）
             results.append(PlayerRatingResult(
-                card_code=code,
+                card_code=primary,
                 rating=1500.0,
                 games=0,
                 wins=0,
@@ -93,7 +98,7 @@ async def get_player_ratings(
         else:
             rating = float(r.rating)
             results.append(PlayerRatingResult(
-                card_code=code,
+                card_code=primary,
                 rating=rating,
                 games=r.games,
                 wins=r.wins,

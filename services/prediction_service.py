@@ -23,6 +23,7 @@ from core.schemas import (
     PlayerPredictionList,
     PlayerPredictionResult,
 )
+from services.identity_service import resolve_to_primary
 from winning_rate import (
     PlayerRecord,
     PredictionResult,
@@ -114,16 +115,21 @@ class PredictionService:
         if team_size not in (1, 2):
             raise ValueError(f"不支持的队伍人数: {team_size}")
 
-        all_cards = list(set(req.team_a + req.team_b))
-        ratings = await self._load_player_ratings(all_cards)
+        # 统一路由到主账号：同一人多手机号/身份证落到同一主账号
+        all_cards = list(dict.fromkeys(req.team_a + req.team_b))
+        primary_map = await resolve_to_primary(self.db, all_cards, CURRENT_SPORT)
+        team_a = [primary_map[c] for c in req.team_a]
+        team_b = [primary_map[c] for c in req.team_b]
+
+        ratings = await self._load_player_ratings(list(dict.fromkeys(team_a + team_b)))
 
         if team_size == 1:
             data = self._predict_singles(
-                req.team_a[0], req.team_b[0], ratings,
+                team_a[0], team_b[0], ratings,
             )
         else:
             data = self._predict_doubles(
-                req.team_a, req.team_b, ratings,
+                team_a, team_b, ratings,
             )
 
         return PredictionResponse(success=True, data=data)

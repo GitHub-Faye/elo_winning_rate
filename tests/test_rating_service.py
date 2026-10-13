@@ -355,3 +355,30 @@ async def test_rating_query_request_with_region():
     assert req.sport_type == "badminton"
     assert req.province == "山西省"
     assert req.city == "太原市"
+
+
+@pytest.mark.asyncio
+async def test_get_ratings_routes_phone_alias_to_primary(monkeypatch):
+    """查询手机号别名 → 落到身份证主账号，返回主账号积分与卡号。
+
+    覆盖 conftest 的恒等路由：某手机号是 CARD_A 的别名。
+    """
+    import services.rating_service as rs
+
+    rows = [_make_row(CARD_A, 1764.32, 30, 20, 10)]
+    db = _make_db(rows)
+    phone = "13800138000"
+
+    async def _fake(db, keys, sport_type="badminton"):
+        m = {phone: CARD_A}
+        for k in keys:
+            m.setdefault(k, k)
+        return m
+
+    monkeypatch.setattr(rs, "resolve_to_primary", _fake)
+
+    data = await get_player_ratings(db, [phone], "badminton")
+
+    assert len(data.results) == 1
+    assert data.results[0].card_code == CARD_A  # 返回主账号（身份证）
+    assert data.results[0].rating == 1764.32

@@ -20,6 +20,8 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.identity_service import resolve_to_primary
+
 # ── 调参 ──
 E_COEF = 1.0            # 抗压公式 E 系数（E≈落后阶段丢分，非真正失误，故降低）
 SIGMOID_K = 12.0        # 得分率归一化 sigmoid 斜率
@@ -316,8 +318,15 @@ def calc_field(games: dict) -> dict:
 # 四、主流程
 # ──────────────────────────────────────────────
 async def profile_player_by_card(db: AsyncSession, card_code: str, limit: int = MAX_RECENT_GAMES) -> dict:
-    """按统一定位键（身份证优先，否则手机号）计算选手最近 limit 场单打的六维雷达图。"""
+    """按统一定位键（身份证优先，否则手机号）计算选手最近 limit 场单打的六维雷达图。
+
+    入参支持身份证或手机号，统一路由到主账号后查询（主账号即身份证号，能覆盖
+    该人所有报名字段）。
+    """
     from services.battle_card_service import get_battles_by_player_key
+
+    # 统一路由到主账号
+    card_code = (await resolve_to_primary(db, [card_code]))[card_code]
 
     # 使用通用方法获取该选手参加的所有 battle
     battles = await get_battles_by_player_key(db, card_code, limit=limit * 2)

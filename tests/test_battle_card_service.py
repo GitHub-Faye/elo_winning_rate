@@ -219,5 +219,66 @@ async def test_get_battles_by_player_key():
     assert result[1]["battle_id"] == 1002
 
 
+@pytest.mark.asyncio
+async def test_get_card_codes_routes_to_primary(monkeypatch):
+    """写入路径按动态聚合把手机号别名路由到身份证最优账号。
+
+    覆盖 conftest 的恒等路由：两层手机号 → 同一主账号，验证账号聚合。
+    """
+    import services.battle_card_service as bcs
+
+    db = AsyncMock(spec=AsyncSession)
+
+    battle_row = MagicMock()
+    battle_row._mapping = {
+        "battle_id": 789,
+        "event_id": 111,
+        "project_type": 1,
+        "player_one_id": 1001,
+        "player_two_id": 1002,
+        "player_one_user_ids": None,
+        "player_two_user_ids": None,
+        "player_one_name": "选手A",
+        "player_two_name": "选手B",
+        "player_one_score": 21,
+        "player_two_score": 15,
+        "battle_time": "2026-08-17 12:00:00",
+    }
+    stage_row1 = MagicMock()
+    stage_row1.id = 1001
+    stage_row1._mapping = {"apply_id": 7001, "player_user_ids": None, "player_names": "选手A"}
+    stage_row2 = MagicMock()
+    stage_row2.id = 1002
+    stage_row2._mapping = {"apply_id": 7002, "player_user_ids": None, "player_names": "选手B"}
+    # 选手A 只有手机号（别名），选手B 是身份证（主账号）
+    user_row1 = MagicMock()
+    user_row1._mapping = {"user_setting_id": 5001, "card_code": None, "phone": "13800138000", "name": "选手A"}
+    user_row2 = MagicMock()
+    user_row2._mapping = {"user_setting_id": 5002, "card_code": "110101199001011234", "phone": None, "name": "选手B"}
+
+    db.execute = AsyncMock(side_effect=[
+        MagicMock(fetchone=MagicMock(return_value=battle_row)),
+        MagicMock(fetchall=MagicMock(return_value=[stage_row1, stage_row2])),
+        MagicMock(fetchall=MagicMock(return_value=[user_row1])),
+        MagicMock(fetchall=MagicMock(return_value=[user_row2])),
+    ])
+
+    # 覆盖 conftest：13800138000 是身份证 110101199001011234 的别名
+    async def _fake_resolver(db, keys, sport_type="badminton"):
+        m = {"13800138000": "110101199001011234"}
+        for k in keys:
+            m.setdefault(k, k)
+        return m
+
+    monkeypatch.setattr(bcs, "resolve_to_primary", _fake_resolver)
+
+    result = await get_card_codes_by_battle_id(db, 789)
+
+    assert result is not None
+    # A 方手机号别名被路由到身份证主账号 → 与 B 方身份证主账号合并成同一人
+    assert result["team_a"] == ["110101199001011234"]
+    assert result["team_b"] == ["110101199001011234"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

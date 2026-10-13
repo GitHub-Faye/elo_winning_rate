@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import EloMatchRecord
 from core.schemas import HeadToHeadData, HeadToHeadRecord
+from services.identity_service import resolve_to_primary
 
 
 async def get_head_to_head(
@@ -13,7 +14,15 @@ async def get_head_to_head(
     player_a_card: str,
     player_b_card: str,
 ) -> HeadToHeadData:
-    """查询两名选手之间的所有交手记录（含单打和双打）。"""
+    """查询两名选手之间的所有交手记录（含单打和双打）。
+
+    入参支持身份证或手机号，统一路由到主账号后查询。
+    """
+    # 统一路由到主账号：同一人多手机号/身份证落到同一主账号
+    primary_map = await resolve_to_primary(db, [player_a_card, player_b_card])
+    player_a_card = primary_map[player_a_card]
+    player_b_card = primary_map[player_b_card]
+
     # 选手 A 的所有比赛
     stmt_a = select(EloMatchRecord).where(EloMatchRecord.player_key == player_a_card)
     result_a = await db.execute(stmt_a)

@@ -16,6 +16,7 @@ from core.schemas import (
     MatchDetailData,
     MatchPlayerResult,
 )
+from services.identity_service import resolve_to_primary
 from services.rating_service import (
     BADMINTON_RANK_TIERS,
     PROVISIONAL_GAMES,
@@ -152,6 +153,8 @@ async def get_match_detail(
     # Step 4: 若提供 card_code，计算详细分析
     analysis: Optional[MatchAnalysis] = None
     if card_code:
+        # 统一路由到主账号：入参支持身份证或手机号
+        card_code = (await resolve_to_primary(db, [card_code]))[card_code]
         # 找到目标选手的比赛记录
         target_record = None
         for r in records:

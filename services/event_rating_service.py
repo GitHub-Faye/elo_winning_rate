@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.models import EloPlayerRating
 from core.schemas import EventPlayerRating, EventRatingData
 from services.battle_card_service import resolve_player_key
+from services.identity_service import resolve_to_primary
 from services.rating_service import PROVISIONAL_GAMES, get_badminton_rank
 
 # 当前运动品类（与 services 层一致，后续可扩展为多品类）
@@ -54,10 +55,16 @@ async def get_event_applicants(
             continue
         unique.setdefault(key, row.name)
 
+    # 统一路由到主账号：同一人多手机号/身份证落到同一主账号
+    primary_map = await resolve_to_primary(db, list(unique.keys()))
+    routed: dict[str, str] = {}
+    for key, name in unique.items():
+        routed.setdefault(primary_map[key], name)
+
     # 去重后按统一定位键排序，保证输出稳定
     return [
         EventPlayerRating(card_code=code, name=name)
-        for code, name in sorted(unique.items())
+        for code, name in sorted(routed.items())
     ]
 
 

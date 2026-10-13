@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import EloMatchRecord
 from core.schemas import PlayerRecord, PlayerRecordsData, PlayerRecordSummary
+from services.identity_service import resolve_to_primary
 
 
 def _default_time(rec: EloMatchRecord) -> datetime:
@@ -32,8 +33,12 @@ async def get_player_records(
 ) -> PlayerRecordsData:
     """查询某选手全部比赛记录，按时间倒序返回。
 
+    入参支持身份证或手机号，统一路由到主账号后查询。
+
     未查到时返回空 records 与全零汇总（不代表选手已建档，仅表示无记录）。
     """
+    primary = (await resolve_to_primary(db, [card_code]))[card_code]
+    card_code = primary
     stmt = (
         select(EloMatchRecord)
         .where(EloMatchRecord.player_key == card_code)

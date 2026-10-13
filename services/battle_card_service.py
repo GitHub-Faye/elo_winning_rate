@@ -12,6 +12,8 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.identity_service import resolve_to_primary
+
 # 身份证（18 位，末尾可为 X/x）
 _ID_RE = re.compile(r"^\d{17}[\dXx]$")
 # 中国手机号（11 位，1[3-9] 开头）
@@ -42,12 +44,17 @@ def resolve_player_key(card_code: Optional[str], phone: Optional[str]) -> Option
 async def get_card_codes_by_battle_id(
     db: AsyncSession,
     battle_id: int,
+    sport_type: str = "badminton",
 ) -> Optional[dict]:
     """根据 battle_id 获取参赛选手的统一定位键（身份证优先，否则手机号）。
+
+    解析后统一动态聚合到最高分账号（见 identity_service.resolve_to_primary）：
+    同一人多手机号/身份证的账号会取其中 Elo 最高的作为比赛落点，避免账号分裂。
 
     Args:
         db: 数据库会话
         battle_id: 对阵 ID
+        sport_type: 运动品类（用于主账号路由）
 
     Returns:
         包含双方选手统一定位键的字典，或 None（比赛不存在时）
@@ -97,6 +104,12 @@ async def get_card_codes_by_battle_id(
 
     team_a_keys, team_a_cards, team_a_phones, names_a = _resolve(team_a)
     team_b_keys, team_b_cards, team_b_phones, names_b = _resolve(team_b)
+
+    # 统一路由到主账号键：同一人多手机号/身份证分散的账号合并到主账号
+    all_keys = list(dict.fromkeys(team_a_keys + team_b_keys))
+    primary_map = await resolve_to_primary(db, all_keys, sport_type)
+    team_a_keys = [primary_map[k] for k in team_a_keys]
+    team_b_keys = [primary_map[k] for k in team_b_keys]
 
     all_count = len(team_a) + len(team_b)
     missing_count = all_count - len(team_a_keys) - len(team_b_keys)
